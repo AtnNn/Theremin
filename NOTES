@@ -1,0 +1,28 @@
+# IgTol
+
+> a = 1
+
+a ? Type FromInteger
+a ? Value 1
+
+(?) :: a -> (a -> Bool) -> Statement
+
+Type :: (T -> U) -> (a :: T) -> U
+
+FromInteger :: T -> (b : Bool)
+  where if b then
+    fromInteger :: 
+
+(::)
+
+FromInteger :: T -> Data {
+  fromInteger :: ... }
+
+> f x = x + 1
+
+> a / b | b != 0 = a `Prim./` b
+
+> Vect n T = data
+>   
+
+> 
