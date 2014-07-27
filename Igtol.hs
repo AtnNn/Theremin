@@ -1,3 +1,5 @@
+{-# OPTIONS_GHC -Wall -fno-warn-unused-binds -fno-warn-unused-imports -fno-warn-unused-matches #-}
+
 module Constraints where
 
 import Debug.Trace
