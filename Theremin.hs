@@ -25,7 +25,8 @@ import Control.Monad.State (
   State, StateT, state, get, evalState, execStateT, evalStateT, runStateT)
 import Control.Monad.Writer (Writer, tell, runWriter)
 import Data.List (intercalate, intersperse)
-import Data.Map (Map, lookup, empty, union, unions, singleton, fromList)
+import Data.Map (Map, lookup, empty, union, unions, singleton, fromList, unionWith)
+import qualified Data.Map as Map
 import Data.Maybe (fromMaybe, catMaybes)
 import Data.Set (Set, difference)
 
@@ -33,7 +34,7 @@ data Expr =
   Let [Stmt] Expr |
   Case Expr [Clause] |
   CaseElse Expr Clause Expr |
-  Lambda [Name] Expr |
+  Lambda Args Expr |
   App Expr [Expr] |
   Val Val
 
@@ -45,11 +46,11 @@ type Name = Int
 data Val =
   Rec String [Val] | 
   Sym String | 
-  Fun (Map Name Name) [Name] Expr | 
+  Fun Args Expr | -- TODO: closure
   Var Name |
   Any
 
-type EvalEnv = (Name, Map Name Name, Map Name Val)
+type EvalEnv = Map Name Val
 
 type Eval a = StateT EvalEnv (ErrorT String Identity) a
 
@@ -60,6 +61,8 @@ type Clause = (Expr, Expr)
 type Loc = [String]
 
 type Free = [Name]
+
+type Args = [Name]
 
 (<<) = flip (>>)
 
@@ -109,9 +112,7 @@ instance Show Val where
     where
     go (Rec sym args) = sym ++ " " ++ intercalate " " (map show args)
     go (Sym s) = ":" ++ s
-    go (Fun env pats body) =
-      "using " ++
-      show env ++
+    go (Fun pats body) =
       "\\(" ++
       intercalate ", " (map show pats) ++
       ") -> " ++
@@ -246,7 +247,7 @@ tests = [
   ]
 
 runEval :: Eval a -> Either String (a, EvalEnv)
-runEval m = runIdentity $ runErrorT $ runStateT m (0, empty, empty)
+runEval m = runIdentity $ runErrorT $ runStateT m empty
 
 evalTop = fmap fst . runEval . eval . Let builtins
 
@@ -256,30 +257,58 @@ test = forM_ tests $ \test -> do
   putStr "Val: "
   putStrLn $ either show show $ evalTop test
 
-mkId :: Eval Name
-mkId = state $ \(n, s, e) -> (n, (n + 1, s, e))
+locals :: [Name] -> Eval a -> Eval a
+locals ns m = do
+  state $ (,) () . (fromList (zip ns (repeat Any)) `union`)
+  ret <- m
+  state $ \env ->
+    let locals = fromList $ flip map ns $ \n ->
+          (n, subst locals (fromMaybe Any (lookup n env)))
+    in ((), Map.map (subst locals) (foldr Map.delete env ns))
+  return ret
+
+subst :: Map Name Val -> Val -> Val
+subst s Any = Any
+subst s (Rec sym args) = Rec sym (map (subst s) args)
+subst s (Sym sym) = Sym sym
+subst s (Fun args body) = Fun args body
+subst s (Var n) = fromMaybe (Var n) (lookup n s)
 
 extend :: [(Name, Val)] -> Eval ()
-extend ns = do
-  ids <- replicateM (length ns) $ mkId
-  state $ \(n, s, e) -> (
-    (),
-    (n,
-     fromList (zip (map fst ns) ids) `union` s,
-     fromList (zip ids (map snd ns)) `union` e))
+extend ((n, val) : xs) = do
+  env <- get
+  let old = fromMaybe Any $ lookup n env
+  new <- unify val old
+  trace (show ("replacing", n, old, new)) $ return ()
+  state $ \env -> ((), singleton n new `union` env)
+  extend xs
+extend [] = return ()
+
+unify :: Val -> Val -> Eval Val
+unify Any a = return a
+unify a Any = return a
+unify (Var n) a = checkOccurs n a >> extend [(n, a)] >> return a
+unify a (Var n) = checkOccurs n a >> extend [(n, a)] >> return a
+unify (Rec con1 args1) (Rec con2 args2)
+  | con1 == con2 && length args1 == length args2 = do
+    args <- zipWithM unify args1 args2
+    return $ Rec con1 args
+unify (Sym s1) (Sym s2) | s1 == s2 = return $ Sym s1
+unify a b = fail "Could not unify" (a, b)
+
+checkOccurs :: Name -> Val -> Eval ()
+checkOccurs n (Var m) | m == n = fail "failed occurs check" n
+checkOccurs n (Rec _ fields) = mapM_ (checkOccurs n) fields
+checkOccurs _ _ = return ()
 
 lookupEval :: Name -> Eval Val
 lookupEval n = do
-  (_, s, e) <- get
-  case lookup n s of
-    Nothing -> extend [(n, Any)] >> return Any
-    Just id -> case lookup id e of
-      Nothing -> return Any
-      Just val -> return val
+  env <- get
+  return $ fromMaybe (Var n) (lookup n env)
 
 eval :: Expr -> Eval Val
 eval x =
-  -- (\ret -> flip trace ret $ "Eval: " ++ show x ++ "\nRet: " ++ show ret) $
+  fmap (\ret -> flip trace ret $ "Eval: " ++ show x ++ "\nRet: " ++ show ret) $
   go x
   where
     go (Let stmts expr) = eval expr << evalStmts stmts
@@ -287,27 +316,25 @@ eval x =
     go (CaseElse expr clause otherwise) = 
       evalCaseElse clause otherwise =<< eval expr
     go (Lambda args body) = evalLambda args body
-    go (App fun args) = join $ liftM2 evalApp (eval fun) (sequence $ map eval args)
+    go (App fun args) = do
+      fun' <- eval fun
+      args' <- sequence $ map eval args
+      evalApp fun' args'
+    go (Val (Var n)) = lookupEval n
     go (Val val) = return $ val
 
 evalLambda args body = do
-  (_, s, _) <- get
-  return $ Fun s args body
+  -- TODO: closure
+  return $ Fun args body
 
 evalApp :: Val -> [Val] -> Eval Val
-evalApp f@(Fun closure params body) args
+evalApp f@(Fun params body) args
   | length args /= length params =
     fail "Invalid number of arguments in function application: " (f, args)
-  | otherwise = do
-      s <- state $ \(n, s, e) -> (s, (n, closure `union` s, e))
+  | otherwise = locals params $ do
       extend $ zip params args
-      ret <- eval body
-      state $ \(n, _, e) -> ((), (n, s, e))
-      return ret
+      eval body
 evalApp (Rec "Con" [Sym sym]) args = return $ Rec sym args
-evalApp (Var n) args = do
-  val <- lookupEval n
-  evalApp val args
 evalApp val _ = fail "Can only apply Con or Fun but got" val
 
 evalCaseElse :: Clause -> Expr -> Val -> Eval Val
@@ -332,7 +359,7 @@ evalCase clauses val = do
 
 match :: Val -> Val -> Eval (Maybe [(Name, Val)])
 match _ Any = fail "cannot match indefinite value Any" ()
-match pat (Var n) = match pat =<< lookupEval n
+match pat (Var n) = fail "cannot match indefinite value Var" n
 match (Rec want pats) (Rec have fields)
   | length pats == length fields && want == have = do
     matches <- sequence $ zipWith match pats fields
@@ -420,7 +447,7 @@ loadVal loc (Var n) = do
   -- TODO: inside a case statement over this variable, make a
   -- new name and use isSubsetOf. Verify the validity of this scheme as well.
   return n
-loadVal loc (Fun closure args body) = do
+loadVal loc (Fun args body) = do
   undefined
 loadVal loc (Sym sym) = do
   undefined
