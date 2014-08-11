@@ -15,8 +15,14 @@ import Debug.Trace
 import Prelude hiding (fail, lookup)
 import Control.Applicative ((<$>))
 import Control.Arrow (first)
-import Control.Monad (join, liftM2, forM_, forM, zipWithM, zipWithM_)
-import Control.Monad.State (State, state, get, evalState, execStateT)
+import Control.Monad (
+  join, liftM2, forM_, forM, zipWithM, zipWithM_, replicateM)
+import Control.Monad.Error (ErrorT, runErrorT, throwError)
+import Control.Monad.Identity (Identity, runIdentity)
+import Control.Monad.Trans (lift)
+import Control.Monad.Reader (ReaderT, runReaderT, ask)
+import Control.Monad.State (
+  State, StateT, state, get, evalState, execStateT, evalStateT, runStateT)
 import Control.Monad.Writer (Writer, tell, runWriter)
 import Data.List (intercalate, intersperse)
 import Data.Map (Map, lookup, empty, union, unions, singleton, fromList)
@@ -24,10 +30,9 @@ import Data.Maybe (fromMaybe, catMaybes)
 import Data.Set (Set, difference)
 
 data Expr =
-  Ref Name |
   Let [Stmt] Expr |
-  CaseOne Expr [Clause] |
-  CaseSeq Expr [Clause] |
+  Case Expr [Clause] |
+  CaseElse Expr Clause Expr |
   Lambda [Name] Expr |
   App Expr [Expr] |
   Val Val
@@ -40,21 +45,23 @@ type Name = Int
 data Val =
   Rec String [Val] | 
   Sym String | 
-  Fun EvalEnv [Name] Expr | 
-  Bind Name |
+  Fun (Map Name Name) [Name] Expr | 
+  Var Name |
   Any
 
-type EvalEnv = Map Name Val
+type EvalEnv = (Name, Map Name Name, Map Name Val)
+
+type Eval a = StateT EvalEnv (ErrorT String Identity) a
 
 data CheckEnv = CheckEnv Name [Expr]
 
 type Clause = (Expr, Expr)
 
-type Result = Either String
-
 type Loc = [String]
 
 type Free = [Name]
+
+(<<) = flip (>>)
 
 intercalates :: String -> [ShowS] -> ShowS
 intercalates sep = foldr (.) id . intersperse (showString sep)
@@ -62,27 +69,27 @@ intercalates sep = foldr (.) id . intersperse (showString sep)
 instance Show Expr where
   showsPrec p expr = fromMaybe (go expr) $ showsPrecBuiltinExpr p expr
     where
-      go (Ref n) = showString "x" . shows n
       go (Let stmts expr) =
         showParen(p > 0) $
         showString "let {" .
-        intercalates ";" (map (showsPrec 0) stmts) .
+        intercalates "; " (map (showsPrec 0) stmts) .
         showString "} in " .
         showsPrec 0 expr
-      go (CaseOne expr clauses) =
+      go (Case expr clauses) =
         showParen (p > 0) $
-        showString "caseOne " .
+        showString "case " .
         showsPrec 0 expr .
         showString " of {" .
         intercalates "; " (map (showsPrec 0) clauses) .
         showString "}"
-      go (CaseSeq expr clauses) =
+      go (CaseElse expr clause otherwise) =
         showParen (p > 0) $
-        showString "caseSeq " .
+        showString "case " .
         showsPrec 0 expr .
-        showString " of {" .
-        intercalates "; " (map (showsPrec 0) clauses) .
-        showString "}"
+        showString " of " .
+        showsPrec 0 clause .
+        showString " else " .
+        showsPrec 0 otherwise
       go (Lambda pats body) =
         showParen (p > 0) $
         showString "\\" .
@@ -109,7 +116,7 @@ instance Show Val where
       intercalate ", " (map show pats) ++
       ") -> " ++
       show body
-    go (Bind n) = "@x" ++ show n
+    go (Var n) = "x" ++ show n
     go Any = "_"
 
 instance Num Expr where
@@ -120,8 +127,8 @@ instance Num Expr where
   fromInteger x | x < 0 = error $ "fromInteger " ++ show x ++ " :: Expr"
                 | otherwise = go x where go 0 = z; go x = s (go (x - 1))
 
-fail :: Show a => String -> a -> Result x
-fail msg a = Left $ msg ++ " " ++ show a
+fail :: Show a => String -> a -> Eval x
+fail msg a = throwError $ msg ++ " " ++ show a
 
 con :: String -> Expr
 con sym = Val $ Rec "Con" [Sym sym]
@@ -139,18 +146,20 @@ builtinFunNames = fromList [
   (mul_, "mul")
   ]
 
+ref = Val . Var
+
 builtins :: [Stmt]
 name0 :: Name
 (name0, builtins) = let
   var = state $ \n -> (n, n + 1)
-  n =: expr = tell [Set (Val $ Bind n) expr]
-  lambda1 n f = var >>= \x -> tell [Set (Val $ Bind n) $ Lambda [x] $ f (Ref x)]
+  n =: expr = tell [Set (ref n) expr]
+  lambda1 n f = var >>= \x -> tell [Set (Val $ Var n) $ Lambda [x] $ f (ref x)]
   lambda2 n f = do
     x <- var; y <- var 
-    tell [Set (Val $ Bind n) $ Lambda [x, y] $ f (Ref x) (Ref y)]
+    tell [Set (ref n) $ Lambda [x, y] $ f (ref x) (ref y)]
   lambda3 n f = do
     x <- var; y <- var; z <- var
-    tell [Set (Val $ Bind n) $ Lambda [x, y, z] $ f (Ref x) (Ref y) (Ref z)]
+    tell [Set (ref n) $ Lambda [x, y, z] $ f (ref x) (ref y) (ref z)]
   in runWriter $ flip execStateT helpName0 $ do
     true_ =: con "True"
     false_ =: con "False"
@@ -159,44 +168,44 @@ name0 :: Name
     lambda2 argument_ $ \f i -> Val $ Sym "TODO"
     lambda1 returnValue_ $ \f -> Val $ Sym "TODO"
     lambda2 isSubsetOf_ $ \a b -> Val $ Sym "TODO"
-    lambda3 if_ $ \a b c -> CaseOne a [(true, b), (false, c)]
+    lambda3 if_ $ \a b c -> Case a [(true, b), (false, c)]
     xx <- var; yy <- var
     lambda2 lte_ $ \x y -> 
-      CaseOne x [
+      Case x [
         (z, true),
-        (s (Val $ Bind xx),
-          CaseOne y [
+        (s (ref xx),
+          Case y [
             (z, false),
-            (s (Val $ Bind yy), lte (Ref xx) (Ref yy))])]
+            (s (ref yy), lte (ref xx) (ref yy))])]
     lambda1 not_ $ \bb ->
-      CaseOne bb [(true, false), (false, true)] 
+      Case bb [(true, false), (false, true)] 
     x <- var
     lambda2 add_ $ \a b ->
-      CaseOne a [(z, b),
-              (s (Val $ Bind x), s (add (Ref x) b))]
+      Case a [(z, b),
+              (s (ref x), s (add (ref x) b))]
     lambda2 mul_ $ \a b ->
-      CaseOne a [(z, z),
-              (s (Val $ Bind x), add b (mul (Ref x) b))]      
+      Case a [(z, z),
+              (s (ref x), add b (mul (ref x) b))]      
 
-true = App (Ref true_) []
-false = App (Ref false_) []
-z = App (Ref z_) []
-s x = App (Ref s_) [x]
-if' c i e = App (Ref if_) [c, i ,e]
-lte a b = App (Ref lte_) [a, b]
-not' b = App (Ref not_) [b]
-add a b = App (Ref add_) [a, b]
-mul a b = App (Ref mul_) [a, b]
-argument f i = App (Ref argument_) [f, i]
-returnValue f = App (Ref returnValue_) [f]
-isSubsetOf a b = App (Ref isSubsetOf_) [a, b]
+true = App (ref true_) []
+false = App (ref false_) []
+z = App (ref z_) []
+s x = App (ref s_) [x]
+if' c i e = App (ref if_) [c, i ,e]
+lte a b = App (ref lte_) [a, b]
+not' b = App (ref not_) [b]
+add a b = App (ref add_) [a, b]
+mul a b = App (ref mul_) [a, b]
+argument f i = App (ref argument_) [f, i]
+returnValue f = App (ref returnValue_) [f]
+isSubsetOf a b = App (ref isSubsetOf_) [a, b]
 
 showsPrecBuiltinExpr :: Int -> Expr -> Maybe ShowS
 showsPrecBuiltinExpr p expr =
   go expr
   where
-    go (Ref n) = showString <$> lookup n builtinFunNames
-    go (App (Ref f) args) 
+    go (Val (Var n)) = showString <$> lookup n builtinFunNames
+    go (App (Val (Var f)) args) 
       | f == true_, [] <- args = Just $ showString "true"
       | f == false_, [] <- args = Just $ showString "false"
       | f == z_, [] <- args= Just $ showString "0"
@@ -236,7 +245,10 @@ tests = [
   mul 2 3
   ]
 
-evalTop = eval empty . Let builtins
+runEval :: Eval a -> Either String (a, EvalEnv)
+runEval m = runIdentity $ runErrorT $ runStateT m (0, empty, empty)
+
+evalTop = fmap fst . runEval . eval . Let builtins
 
 test = forM_ tests $ \test -> do
   putStr "Expr: "
@@ -244,72 +256,104 @@ test = forM_ tests $ \test -> do
   putStr "Val: "
   putStrLn $ either show show $ evalTop test
 
-eval :: EvalEnv -> Expr -> Result Val
-eval env x =
+mkId :: Eval Name
+mkId = state $ \(n, s, e) -> (n, (n + 1, s, e))
+
+extend :: [(Name, Val)] -> Eval ()
+extend ns = do
+  ids <- replicateM (length ns) $ mkId
+  state $ \(n, s, e) -> (
+    (),
+    (n,
+     fromList (zip (map fst ns) ids) `union` s,
+     fromList (zip ids (map snd ns)) `union` e))
+
+lookupEval :: Name -> Eval Val
+lookupEval n = do
+  (_, s, e) <- get
+  case lookup n s of
+    Nothing -> extend [(n, Any)] >> return Any
+    Just id -> case lookup id e of
+      Nothing -> return Any
+      Just val -> return val
+
+eval :: Expr -> Eval Val
+eval x =
   -- (\ret -> flip trace ret $ "Eval: " ++ show x ++ "\nRet: " ++ show ret) $
   go x
   where
-    go (Ref n) = maybe (fail "No such name" (n, env)) return $ lookup n env
-    go (Let stmts expr) = flip eval expr . union env =<< evalStmts env stmts
-    go (CaseOne expr pats) = evalCaseOne env pats =<< eval env expr
-    go (CaseSeq expr pats) = evalCaseSeq env pats =<< eval env expr
-    go (Lambda args body) = return $ Fun env args body
-    go (App fun args) = join $ liftM2 (evalApp env) (eval env fun) (sequence $ map (eval env) args)
+    go (Let stmts expr) = eval expr << evalStmts stmts
+    go (Case expr clauses) = evalCase clauses =<< eval expr
+    go (CaseElse expr clause otherwise) = 
+      evalCaseElse clause otherwise =<< eval expr
+    go (Lambda args body) = evalLambda args body
+    go (App fun args) = join $ liftM2 evalApp (eval fun) (sequence $ map eval args)
     go (Val val) = return $ val
 
-evalApp :: EvalEnv -> Val -> [Val] -> Result Val
-evalApp env f@(Fun closure params body) args
+evalLambda args body = do
+  (_, s, _) <- get
+  return $ Fun s args body
+
+evalApp :: Val -> [Val] -> Eval Val
+evalApp f@(Fun closure params body) args
   | length args /= length params =
     fail "Invalid number of arguments in function application: " (f, args)
   | otherwise = do
-      let binds = fromList $ zip params args
-      eval (binds `union` union closure env) body
-evalApp _ (Rec "Con" [Sym sym]) args = return $ Rec sym args
-evalApp _ val _ = fail "Can only apply Con or Fun but got" val
+      s <- state $ \(n, s, e) -> (s, (n, closure `union` s, e))
+      extend $ zip params args
+      ret <- eval body
+      state $ \(n, _, e) -> ((), (n, s, e))
+      return ret
+evalApp (Rec "Con" [Sym sym]) args = return $ Rec sym args
+evalApp (Var n) args = do
+  val <- lookupEval n
+  evalApp val args
+evalApp val _ = fail "Can only apply Con or Fun but got" val
 
-evalCaseSeq :: EvalEnv -> [Clause] -> Val -> Result Val
-evalCaseSeq env clauses val =
-  foldr go (fail "no match for case" (clauses, val)) clauses
-  where
-    go (pat, expr) next = do
-      patval <- eval env pat
-      maybe next (\binds -> eval (union binds env) expr) =<< match patval val
+evalCaseElse :: Clause -> Expr -> Val -> Eval Val
+evalCaseElse (pat, expr) otherwise val = do
+  patval <- eval pat
+  maybe
+    (eval otherwise)
+    (\binds -> extend binds >> eval expr)
+    =<< match patval val
 
-evalCaseOne :: EvalEnv -> [Clause] -> Val -> Result Val
-evalCaseOne env clauses val = do
+evalCase :: [Clause] -> Val -> Eval Val
+evalCase clauses val = do
   bindss <- mapM go clauses
   case catMaybes bindss of
     [] -> fail "No match" (clauses, val)
-    [(expr, binds)] -> eval (union binds env) expr
+    [(expr, binds)] -> extend binds >> eval expr
     xs -> fail "Too many matches" (clauses, val, xs)
   where
     go (pat, expr) = do
-      patval <- eval env pat
+      patval <- eval pat
       fmap ((,) expr) <$> match patval val
 
-match :: Val -> Val -> Result (Maybe EvalEnv)
-match _ (Bind n) = Left $ "cannot match indefinite value Bind " ++ show n
-match _ Any = Left $ "cannot match indefinite value Any"
+match :: Val -> Val -> Eval (Maybe [(Name, Val)])
+match _ Any = fail "cannot match indefinite value Any" ()
+match pat (Var n) = match pat =<< lookupEval n
 match (Rec want pats) (Rec have fields)
   | length pats == length fields && want == have = do
     matches <- sequence $ zipWith match pats fields
-    return $ fmap unions $ sequence matches
-match (Sym a) (Sym b) | a == b = return $ Just empty
-match (Bind n) val = return $ Just $ singleton n val
-match Any val = return $ Just empty
+    return $ fmap concat $ sequence matches
+match (Sym a) (Sym b) | a == b = return $ Just []
+-- TODO: Var n -> lookup n in environment and unify both
+match (Var n) val = return $ Just $ [(n, val)]
+match Any val = return $ Just []
 match _ _ = return $ Nothing
 
-evalStmts :: EvalEnv -> [Stmt] -> Result EvalEnv
-evalStmts env stmts = fmap (union env . unions) $ sequence $ map (evalStmt env) stmts
+evalStmts :: [Stmt] -> Eval ()
+evalStmts stmts = mapM_ evalStmt stmts
 
-evalStmt :: EvalEnv -> Stmt -> Result EvalEnv
-evalStmt env (Assert _) = return env
-evalStmt env (Set pat expr) = do
-  val <- eval env expr
-  patval <- eval env pat
+evalStmt :: Stmt -> Eval ()
+evalStmt (Assert _) = return ()
+evalStmt (Set pat expr) = do
+  val <- eval expr
+  patval <- eval pat
   maybe
     (fail "Set failed" (pat, val))
-    (\bind -> return $ union bind env)
+    extend
     =<< match patval val
 
 mkName :: State CheckEnv Name
@@ -319,34 +363,29 @@ assert :: Expr -> State CheckEnv ()
 assert expr = state $ \(CheckEnv n e) -> ((), CheckEnv n (expr : e))
 
 load :: Loc -> Expr -> State CheckEnv Name
-load loc (Ref n) = do
-  n' <- mkName
-  assert $ Ref n' `isSubsetOf` Ref n
-  return n'
 load loc (Let stmts expr) = do
   loadStmts ("in let statement" : loc) stmts
   load ("in let expression" : loc) expr
-load loc (CaseOne expr clauses) = do
+load loc (Case expr clauses) = do
   n <- load ("in caseOne expression" : loc) expr
-  loadClauses ("in caseOne clause" : loc) False n clauses
-load loc (CaseSeq expr clauses) = do
-  n <- load ("in caseSeq expression" : loc) expr
-  loadClauses ("in caseSeq clause" : loc) True n clauses
+  loadClauses ("in caseOne clause" : loc) n clauses
+load loc (CaseElse expr clause otherwise) = do
+  undefined
 load loc (Lambda args body) = do
   n <- mkName
   ret <- load ("lambda body" : loc) body
   forM_ (zip [0..] args) $ \(i, arg) ->
-    assert $ CaseOne (argument (Ref n) (fromInteger i)) [(Ref arg, true)]
-  assert $ CaseOne (returnValue (Ref n)) [(Ref ret, true)]
+    assert $ Case (argument (ref n) (fromInteger i)) [(ref arg, true)]
+  assert $ Case (returnValue (ref n)) [(ref ret, true)]
   return n
 load loc (App f args) = do
   ret <- mkName
   fn <- load ("function" : loc) f
   argns <- zipWithM (\i arg -> load (("argument" ++ show i) : loc) arg)
            [0 :: Int ..] args
-  assert $ Ref ret `isSubsetOf` returnValue (Ref fn)
+  assert $ ref ret `isSubsetOf` returnValue (ref fn)
   forM_ (zip [0..] argns) $ \(i, arg) ->
-    assert $ Ref arg `isSubsetOf` argument (Ref fn) (fromInteger i)
+    assert $ ref arg `isSubsetOf` argument (ref fn) (fromInteger i)
   return ret
 load loc (Val val) = loadVal loc val
 
@@ -357,17 +396,16 @@ loadStmt loc i (Assert expr) = assert expr
 loadStmt loc i (Set pat expr) = do
   exprn <- load (show i : loc) expr
   patn <- load (("pattern" ++ show i) : loc) pat
-  assert $ CaseOne (Ref exprn) [(Ref patn, true)]
+  assert $ Case (ref exprn) [(ref patn, true)]
   
 
-loadClauses :: Loc -> Bool -> Name -> [Clause] -> State CheckEnv Name
-loadClauses loc seq n clauses = do
-  let case' = if seq then CaseSeq else CaseOne
+loadClauses :: Loc -> Name -> [Clause] -> State CheckEnv Name
+loadClauses loc n clauses = do
   clausenps <-
     zipWithM (\i clause -> loadClause (show i : loc) clause) [1 :: Int ..] clauses
   ret <- mkName
-  let pat = case' (Ref n) $ map (\(patn, exprn) -> (Ref patn, Ref exprn)) clausenps
-  assert $ CaseOne (Ref ret) [(pat, true)]
+  let pat = Case (ref n) $ map (\(patn, exprn) -> (ref patn, ref exprn)) clausenps
+  assert $ Case (ref ret) [(pat, true)]
   return ret
 
 loadClause :: Loc -> Clause -> State CheckEnv (Name, Name)
@@ -378,8 +416,10 @@ loadClause loc (pat, expr) = do
 
 loadVal loc Any = do
   mkName
-loadVal loc (Bind n) = do
-  undefined
+loadVal loc (Var n) = do
+  -- TODO: inside a case statement over this variable, make a
+  -- new name and use isSubsetOf. Verify the validity of this scheme as well.
+  return n
 loadVal loc (Fun closure args body) = do
   undefined
 loadVal loc (Sym sym) = do
