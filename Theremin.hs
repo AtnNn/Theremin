@@ -8,7 +8,7 @@
 
 {-# LANGUAGE ImplicitParams #-}
 
-module Igtol where
+module Theremin where
 
 import Debug.Trace
 
