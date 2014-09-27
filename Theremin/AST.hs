@@ -19,12 +19,13 @@ type Name = Int
 data Val n =
   Rec String [Val n] | 
   Sym String |
-  Fun Args Locals Expr | -- TODO: closure
+  Fun Args Locals (Closure (Val n)) Expr |
   Var n |
   Any
 
 type CompleteVal = Val Void
 
+type Closure n = Map Name n
 type Clause = (Expr, Expr)
 type Args = [Name]
 type Locals = [Name]
@@ -74,7 +75,7 @@ instance Show n => Show (Val n) where
     where
     go (Rec sym args) = sym ++ " " ++ intercalate " " (map show args)
     go (Sym s) = ":" ++ s
-    go (Fun pats locals body) =
+    go (Fun pats locals body _) =
       "\\(" ++
       intercalate ", " (map show pats) ++
       ") -> " ++

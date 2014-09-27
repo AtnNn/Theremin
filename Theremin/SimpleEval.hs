@@ -47,21 +47,22 @@ runEval m = runST $ runExceptT $ fmap fst $ runStateT m $ EvalEnv empty empty
 toComplete :: Val (STVar s) -> Eval s CompleteVal
 toComplete a =
   case a of
-    Var ref -> fail "Incomplete value" ref
+    Var ref -> toComplete =<< readSTVar ref
     Rec s l -> Rec s <$> mapM toComplete l
     Sym s -> return $ Sym s
-    Fun a l e -> return $ Fun a l e
+    Fun a l c e -> do c' <- mapM toComplete c; return $ Fun a l c' e
     Any -> return $ Any
 
 evalTop :: Expr -> Either String CompleteVal
 evalTop e = runEval (toComplete =<< eval (Let builtins e))
 
-scope :: [Name] -> ([STVal s] -> Eval s a) -> Eval s a
-scope ns m = do
-  old <- get
+scope :: Closure (STVal s) -> [Name] -> ([STVal s] -> Eval s a) -> Eval s a
+scope clo ns m = do
+  EvalEnv loc glo <- get
+  put $ EvalEnv clo glo
   vars <- mapM newLocalVar ns
   ret <- m vars
-  put old
+  modify' $ \(EvalEnv _ glo) -> EvalEnv loc glo
   return ret
 
 newLocalVar :: Name -> Eval s (STVal s)
@@ -115,7 +116,9 @@ evalVal Any = return $ Any
 evalVal (Var n) = lookupEnv n
 evalVal (Rec con fields) = Rec con <$> mapM evalVal fields
 evalVal (Sym sym) = return $ Sym sym
-evalVal (Fun args locals body) = return $ Fun args locals body
+evalVal (Fun args locals closure body) = do
+  closure' <- mapM evalVal closure
+  return $ Fun args locals closure' body
 
 eval :: Expr -> Eval s (STVal s)
 eval x = do
@@ -145,14 +148,14 @@ unref (Rec con fields) = Rec con <$> mapM unref fields
 unref val = return $ val
 
 evalLambda args locals body = do
-  -- TODO: closure
-  return $ Fun args locals body
+  EvalEnv loc _ <- get
+  return $ Fun args locals loc body
 
 evalApp :: STVal s -> [STVal s] -> Eval s (STVal s)
-evalApp f@(Fun params locals body) args
+evalApp f@(Fun params locals closure body) args
   | length args /= length params =
     fail "Invalid number of arguments in function application: " (f, args)
-  | otherwise = scope (params ++ locals) $ \vars -> do
+  | otherwise = scope closure (params ++ locals) $ \vars -> do
       zipWithM_ unify vars args
       eval body
 evalApp (Rec "Con" [Sym sym]) args = return $ Rec sym args
