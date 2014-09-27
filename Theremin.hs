@@ -401,7 +401,11 @@ evalStmts :: [Stmt] -> Eval ()
 evalStmts stmts = mapM_ evalStmt stmts
 
 evalStmt :: Stmt -> Eval ()
-evalStmt (Assert _) = return ()
+evalStmt (Assert expr) = do
+  test <- eval expr
+  case test of
+    Rec "True" [] -> return ()
+    otherwise -> fail "Failed assert" expr
 evalStmt (Set pat expr) = do
   --trace ("Stmt: " ++ show pat ++ " = " ++ show expr) $ return ()
   val <- eval expr
@@ -479,16 +483,4 @@ loadVal loc (Sym sym) = do
   undefined
 loadVal loc (Rec con fields) = do
   undefined
-
-data The a = The {
-  
-  }
-
-assuming :: x -> The a -> The a
-
-first :: [The a] -> The a
-
-unique :: [The a] -> The a
-
-fail :: The a
 
