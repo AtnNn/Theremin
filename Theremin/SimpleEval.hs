@@ -202,7 +202,6 @@ evalStmt (Assert expr) = do
     Rec "True" [] -> return ()
     otherwise -> fail "Failed assert" expr
 evalStmt (Set pat expr) = do
-  --trace ("Stmt: " ++ show pat ++ " = " ++ show expr) $ return ()
   val <- eval expr
   patval <- eval pat
   _ <- unify patval val
