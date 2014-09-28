@@ -7,8 +7,9 @@ experiment with:
 * Code search, versioning
 * Polyglot programming
 
-Theremin does not exist yet. The code in this repository currently
-only contains an evaluator for a prolog-like language.
+Theremin is in a very early stage of development. The code in this
+repository currently only contains an evaluator for a prolog-like
+language.
 
 Join the discussion on irc.freenode.net #theremin
 
@@ -63,7 +64,7 @@ with trust and transitive imports.
 
 Interoperability with other languages is one of the main concerns of
 Theremin. Although it is currently only a playground for ideas, the
-goal of Theremin is be useful for everyday programmers. It must
+goal of Theremin is to be useful for everyday programmers. It must
 therefore work with mainstream languages.
 
 ## Authors
