@@ -39,9 +39,6 @@ name0 :: Name
     false_ =: con "False"
     z_ =: con "Z"
     s_ =: con "S"
-    lambda2 argument_ [] $ \f i -> Val $ Sym "TODO"
-    lambda1 returnValue_ [] $ \f -> Val $ Sym "TODO"
-    lambda2 isSubsetOf_ [] $ \a b -> Val $ Sym "TODO"
     lambda3 if_ [] $ \a b c -> Case a [(true, b), (false, c)]
     xx <- var; yy <- var
     lambda2 lte_ [xx, yy] $ \x y -> 
