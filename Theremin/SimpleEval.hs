@@ -6,31 +6,43 @@ import Theremin.Builtins
 import qualified Control.Monad
 
 type Env s = Map Name (STVal s)
-data EvalEnv s = EvalEnv { local, global :: Env s }
+data EvalEnv s = EvalEnv { local, global :: Env s, nextId :: Int }
 type Eval s a = StateT (EvalEnv s) (ExceptT String (ST s)) a
-data STVar s = STVar Name (STRef s (Val (STVar s)))
+data STVar s = STVar Name Int (STRef s (Val (STVar s)))
 type STVal s = Val (STVar s)
+type UnifyEnv s = Map (STVar s) (STVal s)
 
 instance Show (EvalEnv s) where
-  show (EvalEnv loc glo) = "EvalEnv " ++ show loc ++ " " ++ show glo
+  show (EvalEnv loc glo id) = "EvalEnv " ++ show loc ++ " " ++ show glo ++ " " ++ show id
 
 instance Show (STVar s) where
-  show (STVar n _) = "STVar " ++ show n
+  show (STVar n id _) = "STVar " ++ show n ++ " " ++ show id
 
 instance Eq (STVar s) where
-  (STVar _ a) == (STVar _ b) = a == b
+  (STVar _ a _) == (STVar _ b _) = a == b
+
+instance Ord (STVar s) where
+  compare (STVar _ a _) (STVar _ b _) = compare a b
 
 setLocal :: Name -> STVal s -> Eval s ()
-setLocal n v = modify' $ \(EvalEnv loc glo) -> EvalEnv (insert n v loc) glo
+setLocal n v = modify' $ \(EvalEnv loc glo nid) -> EvalEnv (insert n v loc) glo nid
 
 setGlobal :: Name -> STVal s -> Eval s ()
-setGlobal n v = modify' $ \(EvalEnv loc glo) -> EvalEnv loc (insert n v glo)
+setGlobal n v = modify' $ \(EvalEnv loc glo nid) -> EvalEnv loc (insert n v glo) nid
+
+genId :: Eval s Int
+genId = do
+  EvalEnv loc glo id <- get
+  put $ EvalEnv loc glo (id + 1)
+  return id
 
 stVarRef :: STVar s -> STRef s (STVal s)
-stVarRef (STVar _ ref) = ref
+stVarRef (STVar _ _ ref) = ref
 
 newSTVar :: Name -> STVal s -> Eval s (STVar s)
-newSTVar n = lift . lift . fmap (STVar n) . newSTRef
+newSTVar n val = do
+  id <- genId
+  lift $ lift $ fmap (STVar n id) $ newSTRef val
 
 readSTVar :: STVar s -> Eval s (STVal s)
 readSTVar = lift . lift . readSTRef . stVarRef
@@ -42,7 +54,7 @@ fail :: Show a => String -> a -> Eval s x
 fail msg a = throwError $ msg ++ " " ++ show a
 
 runEval :: (forall s . Eval s a) -> Either String a
-runEval m = runST $ runExceptT $ fmap fst $ runStateT m $ EvalEnv empty empty
+runEval m = runST $ runExceptT $ fmap fst $ runStateT m $ EvalEnv empty empty 0
 
 toComplete :: Val (STVar s) -> Eval s CompleteVal
 toComplete a =
@@ -58,11 +70,11 @@ evalTop e = runEval (toComplete =<< eval (Let builtins e))
 
 scope :: Closure (STVal s) -> [Name] -> ([STVal s] -> Eval s a) -> Eval s a
 scope clo ns m = do
-  EvalEnv loc glo <- get
-  put $ EvalEnv clo glo
+  EvalEnv loc glo nid <- get
+  put $ EvalEnv clo glo nid
   vars <- mapM newLocalVar ns
   ret <- m vars
-  modify' $ \(EvalEnv _ glo) -> EvalEnv loc glo
+  modify' $ \(EvalEnv _ glo nid) -> EvalEnv loc glo nid
   return ret
 
 newLocalVar :: Name -> Eval s (STVal s)
@@ -71,26 +83,41 @@ newLocalVar n = do
   setLocal n (Var var)
   return (Var var)
 
-unifyVar :: STVar s -> STVal s -> Eval s (STVal s)
+unifyVar :: STVar s -> STVal s -> Eval s (Map (STVar s) (STVal s), STVal s)
 unifyVar var b = do
   checkOccurs var b
   a <- readSTVar var
   c <- unify a b
-  writeSTVar var c
-  return c
+  return (singleton var c, c)
+
+joinAssignments :: UnifyEnv s -> UnifyEnv s -> Eval s (UnifyEnv s)
+joinAssignments a b = foldrM add b (mapToList a) where
+  add :: (STVar s, STVal s) -> UnifyEnv s -> Eval s (UnifyEnv s)
+  add (var, val) ass = maybe (return $ insert var val ass) (join ass var val) $ lookup var ass
+  join :: UnifyEnv s -> STVar s -> STVal s -> STVal s -> Eval s (UnifyEnv s)
+  join ass var x y = do
+    (extra, val) <- tryUnify x y
+    joinAssignments (insert var val extra) ass
 
 unify :: STVal s -> STVal s -> Eval s (STVal s)
-unify a b = do a' <- unref a; b' <- unref b; go a' b' where
-  go (Var var) a = unifyVar var a
-  go a (Var var) = unifyVar var a
-  go (Rec con1 args1) (Rec con2 args2)
-    | con1 == con2 && length args1 == length args2 = do
-      args <- zipWithM unify args1 args2
-      return $ Rec con1 args
-  go (Sym s1) (Sym s2) | s1 == s2 = return $ Sym s1
-  go Any a = return a
-  go a Any = return a
-  go a b = fail "Could not unify" (a, b)
+unify a b = do
+  a' <- unref a
+  b' <- unref b
+  (assignments, val) <- tryUnify a' b'
+  forM_ (mapToList assignments) $ uncurry writeSTVar
+  return val
+
+tryUnify (Var var) a = unifyVar var a
+tryUnify a (Var var) = unifyVar var a
+tryUnify (Rec con1 args1) (Rec con2 args2)
+  | con1 == con2 && length args1 == length args2 = do
+    (assignments, args) <- unzip <$> zipWithM tryUnify args1 args2
+    assignments' <- foldrM joinAssignments empty assignments
+    return (assignments', Rec con1 args)
+tryUnify (Sym s1) (Sym s2) | s1 == s2 = return (empty, Sym s1)
+tryUnify Any a = return (empty, a)
+tryUnify a Any = return (empty, a)
+tryUnify a b = fail "Could not unify" (a, b)
 
 checkOccurs :: STVar s -> Val (STVar s) -> Eval s ()
 checkOccurs var (Var m) | m == var = return ()
@@ -104,7 +131,7 @@ checkOccurs var val = go val where
 
 lookupEnv :: Name -> Eval s (STVal s)
 lookupEnv n = do
-  EvalEnv loc glo <- get
+  EvalEnv loc glo _ <- get
   ifJust (lookup n loc) unref $ 
     ifJust (lookup n glo) unref $ do
       var <- newSTVar n Any
@@ -148,7 +175,7 @@ unref (Rec con fields) = Rec con <$> mapM unref fields
 unref val = return $ val
 
 evalLambda args locals body = do
-  EvalEnv loc _ <- get
+  EvalEnv loc _ _ <- get
   return $ Fun args locals loc body
 
 evalApp :: STVal s -> [STVal s] -> Eval s (STVal s)

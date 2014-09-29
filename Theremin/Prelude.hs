@@ -27,7 +27,7 @@ module Theremin.Prelude (
 import Prelude (
   String, Int, ShowS, Either(..), Bool(..), Char,
   Num(..), Ord(..), Eq(..), Show(..), Functor(..),
-  (.), id, ($), (++), map, flip, fst, snd, (&&),
+  (.), id, ($), (++), map, flip, fst, snd, (&&), uncurry,
   showString, showParen, shows,
   error, otherwise, undefined)
 import Control.Applicative ((<$>), (<*>))
@@ -46,9 +46,11 @@ import Control.Monad.Writer (Writer, tell, runWriter)
 import Control.Monad.ST (ST, runST)
 import Control.Monad.Fix (fix)
 import Data.STRef (STRef, newSTRef, readSTRef, writeSTRef)
-import Data.List (length, intercalate, intersperse, tails, zip)
+import Data.List (length, intercalate, intersperse, tails, zip, unzip)
 import Data.Map (
-  Map, lookup, empty, union, unions, singleton, fromList, unionWith, insert)
+  Map,
+  lookup, empty, union, unions, singleton, fromList, unionWith, insert, mapWithKey)
+import qualified Data.Map
 import Data.Maybe (Maybe(..), maybe, fromMaybe, catMaybes, listToMaybe)
 import Data.Set (Set, difference)
 import Data.Either (either)
@@ -71,3 +73,4 @@ ifNothing :: Maybe a -> b -> (a -> b) -> b
 ifNothing Nothing b _ = b
 ifNothing (Just a) _ f = f a
 
+mapToList = Data.Map.toList
