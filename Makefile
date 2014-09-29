@@ -7,6 +7,7 @@ SOURCES = Theremin.hs $(shell find Theremin | egrep '\.(hs|hs-boot)')
 
 theremin: $(SOURCES) | build
 	ghc -o $@ --make Theremin.hs -main-is Theremin $(GHCFLAGS)
+	@test -e $@ && touch $@
 
 build:
 	mkdir build
