@@ -1,13 +1,18 @@
 #include <stdio.h>
 #include <inttypes.h>
 #include <malloc.h>
-#include <string.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <string.h>
 
 #define GLOBALS_SIZE 4096
 #define POOL_SECTION_SIZE 4096
 #define COLLISION_HASHTABLE_SIZE 256
+
+#define HASH_INIT 2166136261
+#define HASH_PRIME 16777619
+
+#define UNREACHABLE __builtin_unreachable()
 
 typedef uint32_t hash_t;
 typedef uint8_t functor_size_t;
@@ -29,6 +34,8 @@ typedef struct Term {
     } data;
 } Term;
 
+typedef bool (*prim_t)(Term**);
+typedef hash_t (*hash_function_t)(Term*);
 typedef struct {
     size_t sections;
     size_t free;
@@ -37,14 +44,12 @@ typedef struct {
 
 typedef struct {
     size_t size;
-    hash_t (*hash)(Term*);
     Term* table[1];
 } HashTable;
 
-HashTable* HashTable_new(size_t size, hash_t (*hash)(Term*)){
+HashTable* HashTable_new(size_t size){
     HashTable* table = malloc(sizeof(HashTable) + sizeof(Term*) * (size - 1));
     table->size = size;
-    table->hash = hash;
     memset(table->table, 0, sizeof(Term*) * size);
     return table;
 }
@@ -61,6 +66,7 @@ bool would_gc = false;
 void fatal_error(char* message){
     fprintf(stderr, "fatal error: %s\n", message);
     exit(1);
+    UNREACHABLE;
 }
 
 Pool* Pool_new(){
@@ -244,7 +250,7 @@ Term* Functor4(char* atom, Term* a, Term* b, Term* c, Term* d){
     return term;
 }
 
-Term* Functor4(char* atom, Term* a, Term* b, Term* c, Term* d, Term* e){
+Term* Functor5(char* atom, Term* a, Term* b, Term* c, Term* d, Term* e){
     Term* term = Functor_unsafe(atom, 5);
     Functor_set_arg(term, 0, a);
     Functor_set_arg(term, 2, b);
@@ -257,39 +263,84 @@ Term* Functor4(char* atom, Term* a, Term* b, Term* c, Term* d, Term* e){
 Term* Var(char* name){
     Term* term = Pool_add_term_gc(pool);
     term->type = VAR;
-    term->data.ref.name = name;
+    term->data.ref.name = strdup(name);
     term->data.ref.ref = term;
     return term;
 }
 
-hash_t hash_functor_spec(char* name, functor_size_t n){
-    uint32_t hash = 2166136261;
-    for(; *name; name++){
-        hash ^= *name;
-        hash *= 16777619;
+hash_t hash_byte(uint8_t c, hash_t hash){
+    return (hash ^ c) * HASH_PRIME;
+}
+
+hash_t hash_string(char* str, hash_t hash){
+    for(; *str; str++){
+        hash = hash_byte(*str, hash);
     }
-    hash ^= n;
-    hash *= 16777619;
     return hash;
 }
 
-void HashTable_insert(HashTable* table, Term* term){
-    hash_t hash = table->hash(term);
-    Term** list = &table->table[hash % table->size];
-    Term* tail = *list;
-    disable_gc();
-    *list = Functor_unsafe(".", 2);
-    Functor_set_arg(*list, 0, term);
-    if(tail){
-        Functor_set_arg(*list, 1, tail);
-    }else{
-        Functor_set_arg(*list, 1, Atom("[]"));
+hash_t hash_integer(integer_t x, hash_t hash){
+    char* c = (char*)&x;
+    for(int i = 0; i < sizeof(x); i++){
+        hash = hash_byte(c[i], hash);
     }
+    return hash;
+}
+
+hash_t hash_rec(Term* term, hash_t hash){
+    switch(term->type){
+    case INTEGER:
+        return hash_integer(term->data.integer, hash);
+    case FUNCTOR:
+        hash = hash_string(term->data.functor.atom, hash);
+        functor_size_t size = term->data.functor.size;
+        if(size){
+
+        }
+        return hash;
+    case VAR:
+        fatal_error("Cannot hash a variable");
+        return 0;
+    case MOVED:
+        fatal_error("Cannot hash a moved term");
+        return 0;
+    }
+}
+
+hash_t hash(Term* term){
+    uint32_t hash = HASH_INIT;
+    return hash_rec(term, hash);
+}
+
+Term* Spec(char* atom, int size){
+    disable_gc();
+    return Functor2("/", Atom(atom), Integer(size));
     enable_gc();
 }
 
-Term* HashTable_find_matching(HashTable* table, Term* term){
-    return table->table[table->hash(term) % table->size];
+Term** Functor_get(Term* term, char* atom, functor_size_t size){
+    if(term->type != FUNCTOR ||
+       strcmp(term->data.functor.atom, atom) ||
+       term->data.functor.size != size){
+        return NULL;
+    }
+    return term->data.functor.args;
+}
+
+Term* List_head(Term* list){
+    Term** args = Functor_get(list, ".", 2);
+    if(!args) fatal_error("Not a list");
+    return args[0];
+}
+
+Term* List_tail(Term* list){
+    Term** args = Functor_get(list, ".", 2);
+    if(!args) fatal_error("Not a list");
+    return args[1];
+}
+
+bool Atom_eq(Term* term, char* atom){
+    return !!Functor_get(term, atom, 0);
 }
 
 Term* chase(Term* term){
@@ -299,7 +350,85 @@ Term* chase(Term* term){
     return term;
 }
 
-void prim_print(Term* term){
+bool Term_exact_eq(Term* a, Term* b){
+    a = chase(a);
+    b = chase(b);
+    if(a->type != b->type){
+        return false;
+    }
+    switch(a->type){
+    case MOVED:
+        fatal_error("Foudn a moved term when comparing terms");
+    case VAR:
+        return a == b;
+    case INTEGER:
+        return a->data.integer == b->data.integer;
+    case FUNCTOR:
+        if(a->data.functor.atom != b->data.functor.atom){
+            return false;
+        }
+        if(a->data.functor.size != b->data.functor.size){
+            return false;
+        }
+        for(int i = 0; i < a->data.functor.size; i++){
+            if(!Term_exact_eq(a->data.functor.args[i], b->data.functor.args[i])){
+                return false;
+            }
+        }
+        return true;
+    }
+}
+
+Term** Assoc_get(Term** assoc, Term* key){
+    for(Term* list = *assoc; !Atom_eq(list, "[]"); list = List_tail(list)){
+        Term** args = Functor_get(List_head(list), ":", 2);
+        if(!args) fatal_error("Not an assoc list");
+        if(Term_exact_eq(key, args[0])){
+            return &args[1]; 
+        }
+    }
+    enable_gc();
+    Term* pair = Functor2(":", key, NULL);
+    *assoc = Functor2(".", pair, *assoc);
+    disable_gc();
+    return &pair->data.functor.args[1];
+}
+
+Term* Assoc_find(Term* assoc, Term* key){
+    for(Term* list = assoc; !Atom_eq(list, "[]"); list = List_tail(list)){
+        Term** args = Functor_get(List_head(list), ":", 2);
+        if(!args) fatal_error("Not an assoc list");
+        if(Term_exact_eq(key, args[0])){
+            return args[1];
+        }
+    }
+    return NULL;
+}
+
+Term** HashTable_get(HashTable* table, Term* key){
+    Term** assoc = &table->table[hash(key) % table->size];
+    disable_gc();
+    if(!*assoc){
+        *assoc = Atom("[]");
+    }
+    Term** val = Assoc_get(assoc, key);
+    enable_gc();
+    return val;
+}
+
+void HashTable_append(HashTable* table, Term* key, Term* val){
+    Term** list = HashTable_get(table, key);
+    disable_gc();
+    (*list) = Functor2(".", val, *list ? *list : Atom("[]"));
+    enable_gc();
+}
+
+Term* HashTable_find(HashTable* table, Term* key){
+    Term *assoc = table->table[hash(key) % table->size];
+    return Assoc_find(assoc, key);
+}
+
+void Term_print(Term* term){
     term = chase(term);
     switch(term->type){
     case MOVED:
@@ -327,58 +456,51 @@ void prim_print(Term* term){
     }
 }
 
-bool prim_fail(Term*){
+bool prim_print(Term** args){
+    Term_print(args[0]);
+    return true;
+}
+
+bool prim_fail(Term** args){
     return false;
 }
 
-Term* Functor_get(Term* term, char* atom, functor_size_t size){
-    if(term->type != FUNCTOR ||
-       strcmp(term->data.functor.atom, atom) ||
-       term->data.functor.size != size){
-        return NULL;
-    }
-    return term->data.functor.args;
-}
-
-Term* List_head(Term* list){
-    Term* args = Functor_get(list, ".", 2);
-    if(!args) fatal_error("Not a list");
-    return args[0];
-}
-
-Term* List_tail(Term* list){
-    Term* args = Functor_get(list, ".", 2);
-    if(!args) fatal_error("Not a list");
-    return args[1];
-}
-
-bool Atom_eq(Term* term, char* atom){
-    return !!Functor_get(term, atom, 0);
-}
-
 Term* Term_copy_rec(Term* term, HashTable* vars){
-    disable_gc();
     term = chase(term);
     switch(term->type){
     case INTEGER:
         return term;
     case FUNCTOR:
+        gc(pool);
         functor_size_t size = term->data.functor.size;
-        Term* args = term->data.functor.args;
+        Term** args = term->data.functor.args;
         Term* copy = Functor_unsafe(term->data.functor.atom, size);
         for(int i = 0; i < size; i++){
             Functor_set_arg(copy, i, Term_copy_rec(args[i], vars));
         }
         return copy;
     case VAR:
-    case MOVED:
         // TODO
+    case MOVED:
+        fatal_error("Cannot copy a moved term"); 
+        return NULL;
     }
+}
+
+void HashTable_reset(HashTable* table){
+    memset(table->table, 0, sizeof(Term*) * table->size);
+}
+
+Term* Term_copy(Term* term){
+    HashTable_reset(vars);
+    disable_gc();
+    Term* copy = Term_copy_rec(term, vars);
     enable_gc();
+    return copy;
 }
 
 bool Rule_spec(Term* term, char** name, int* size){
-    Term* args = Functor_get(term, ":-", 2);
+    Term** args = Functor_get(term, ":-", 2);
     if(args){
         term = args[0];
     }
@@ -390,23 +512,13 @@ bool Rule_spec(Term* term, char** name, int* size){
     return false;
 }
 
-hash_t Rule_hash(Term* term){
-    // TODO
-}
-
-bool Rule_match(Term* term, char* atom, functor_size_t size){
-    // TODO
-}
-
 void stack_push(char* name, functor_size_t size, Term* term){
-    Term* list = HashTable_find(name, size);
+    Term* list = HashTable_find(globals, term);
     disable_gc();
     Term* rules = Atom("[]");
-    for(; list = List_tail(list); !Atom_eq(list, "[]")){
-        term* rule = List_head(list);
-        if(Rule_match(rule, name, size)){
-            rules = Functor2(".", Term_copy(rule), rules);
-        }
+    for(; !Atom_eq(list, "[]"); list = List_tail(list)){
+        Term* rule = List_head(list);
+        rules = Functor2(".", Term_copy(rule), rules);
     }
     stack = Functor5("frame", term, rules, next_query, Atom("[]"), stack);
     next_query = NULL;
@@ -415,9 +527,10 @@ void stack_push(char* name, functor_size_t size, Term* term){
 
 bool stack_next(bool success){
     // TODO
+    return 3;
 }
 
-bool (*)(Term*) find_prim(char* name, functor_size_t size){
+prim_t find_prim(char* name, functor_size_t size){
     if(!strcmp(name, "print") && size == 1){
         return prim_print;
     }
@@ -441,10 +554,10 @@ bool eval(){
         case MOVED:
             fatal_error("Cannot eval moved term");
             break;
-        case FUNCTOR:
+        case FUNCTOR: {
             char* atom = term->data.functor.atom;
             functor_size_t size = term->data.functor.size;
-            Term* args = term->data.functor.args;
+            Term** args = term->data.functor.args;
             if(!strcmp(atom, ",") && size == 2){
                 disable_gc();
                 next_query = next_query ? Functor2(",", args[1], next_query) : args[1];
@@ -452,41 +565,41 @@ bool eval(){
                 enable_gc();
                 continue;
             }
-            bool (*prim)(Term*) = find_prim(atom, size);
+            prim_t prim = find_prim(atom, size);
             if(prim){
                 success = prim(args);
             }else{
                 stack_push(atom, size, term);
             }
-            if(!sucess || !next_query){
+            if(!success || !next_query){
                 if(!stack_next(success)){
                     return success;
                 }
             }
             query = next_query;
             next_query = NULL;
-            break;
+            break; }
         }
     }
 }
 
 int main(){
-    disable_gc++;
+    disable_gc();
 
     pool = Pool_new();
-    globals = HashTable_new(GLOBALS_SIZE, Rule_hash);
-    vars = HashTable_new(COLLISION_HASHTABLE_SIZE, hash_ptr);
+    globals = HashTable_new(GLOBALS_SIZE);
+    vars = HashTable_new(COLLISION_HASHTABLE_SIZE);
     stack = Atom("empty");
 
     Term* pred = Functor2("foo", Atom("bar"), Atom("baz"));
-    HashTable_insert(globals, pred);
+    HashTable_append(globals, Spec("foo", 2), pred);
 
     Term* X = Var("X");
-    query = Functor2(","
+    query = Functor2(",",
                      Functor2("foo", Atom("bar"), X),
                      Functor1("print", X));
 
-    disable_gc--;
+    enable_gc();
 
     eval();
 }
