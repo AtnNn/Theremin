@@ -4,10 +4,12 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <string.h>
+#include <stdarg.h>
 
 #define GLOBALS_SIZE 4096
 #define POOL_SECTION_SIZE 4096
 #define COLLISION_HASHTABLE_SIZE 256
+#define DEFAULT_BUFFER_SIZE 1024
 
 #define HASH_INIT 2166136261
 #define HASH_PRIME 16777619
@@ -17,7 +19,7 @@
 typedef uint32_t hash_t;
 typedef uint8_t functor_size_t;
 typedef int32_t integer_t;
-
+typedef void (*renderer_t)(void*, char*);
 typedef struct Term {
     enum { FUNCTOR, VAR, MOVED, INTEGER } type;
     union {
@@ -36,6 +38,13 @@ typedef struct Term {
 
 typedef bool (*prim_t)(Term**);
 typedef hash_t (*hash_function_t)(Term*);
+
+typedef struct {
+    size_t size;
+    size_t pos;
+    char* str;
+} Buffer;
+
 typedef struct {
     size_t sections;
     size_t free;
@@ -46,6 +55,28 @@ typedef struct {
     size_t size;
     Term* table[1];
 } HashTable;
+
+#define MIN(a,b) ((a) < (b) ? a : b)
+#define MAX(a,b) ((a) < (b) ? b : a)
+
+Buffer* Buffer_new(size_t size){
+    Buffer* buffer = malloc(sizeof(Buffer));
+    buffer->size = size;
+    buffer->pos = 0;
+    buffer->str = malloc(size + 1);
+    buffer->str[0] = 0;
+    return buffer;
+}
+
+void Buffer_free(Buffer* buffer){
+    free(buffer->str);
+    free(buffer);
+}
+
+void Buffer_resize(Buffer* buffer, size_t size){
+    buffer->str = realloc(buffer->str, size);
+    buffer->size = size;
+}
 
 HashTable* HashTable_new(size_t size){
     HashTable* table = malloc(sizeof(HashTable) + sizeof(Term*) * (size - 1));
@@ -63,8 +94,13 @@ Term* next_query = NULL;
 int gc_disable_count = 0;
 bool would_gc = false;
 
-void fatal_error(char* message){
-    fprintf(stderr, "fatal error: %s\n", message);
+void fatal_error(char* format, ...){
+    va_list argptr;
+    va_start(argptr, format);
+    fprintf(stderr, "fatal error: ");
+    vfprintf(stderr, format, argptr);
+    fprintf(stderr, "\n");
+    va_end(argptr);
     exit(1);
     UNREACHABLE;
 }
@@ -327,20 +363,13 @@ Term** Functor_get(Term* term, char* atom, functor_size_t size){
     return term->data.functor.args;
 }
 
-Term* List_head(Term* list){
-    Term** args = Functor_get(list, ".", 2);
-    if(!args) fatal_error("Not a list");
-    return args[0];
-}
-
-Term* List_tail(Term* list){
-    Term** args = Functor_get(list, ".", 2);
-    if(!args) fatal_error("Not a list");
-    return args[1];
-}
-
-bool Atom_eq(Term* term, char* atom){
-    return !!Functor_get(term, atom, 0);
+void Buffer_append(Buffer* buffer, char* str){
+    size_t len = strlen(str);
+    if(buffer->pos + len >= buffer->size){
+        Buffer_resize(buffer, MAX(buffer->size * 2, buffer->pos + len));
+    }
+    strcpy(buffer->str + buffer->pos, str);
+    buffer->pos += len;
 }
 
 Term* chase(Term* term){
@@ -348,6 +377,79 @@ Term* chase(Term* term){
         term = term->data.ref.ref;
     }
     return term;
+}
+
+void Term_render(Term* term, void(*write)(void*, char*), void* data){
+    term = chase(term);
+    switch(term->type){
+    case MOVED:
+        write(data, "_MOVED");
+        break;
+    case VAR:
+        write(data, term->data.ref.name ? term->data.ref.name : "_");
+        break;
+    case INTEGER: {
+        char buf[16];
+        sprintf(buf, "%d", term->data.integer);
+        write(data, buf);
+        break;
+    }
+    case FUNCTOR:
+        write(data, term->data.functor.atom);
+        if(term->data.functor.size){
+            write(data, "(");
+            for(int i = 0; i < term->data.functor.size; i++){
+                Term_render(term->data.functor.args[i], write, data);
+                if(i + 1 < term->data.functor.size){
+                    write(data, ", ");
+                }
+            }
+            write(data, ")");
+        }
+        break;
+    }
+}
+
+Buffer* Term_show(Term* term){
+    Buffer* buffer = Buffer_new(DEFAULT_BUFFER_SIZE);
+    Term_render(term, (renderer_t)Buffer_append, buffer);
+    Buffer_resize(buffer, buffer->pos + 1);
+    return buffer;
+}
+
+void trace_term(char* str, Term* term){
+    Buffer* buffer = Term_show(term);
+    fprintf(stderr, "%s: %s\n", str, buffer->str);
+    Buffer_free(buffer);
+}
+
+bool Atom_eq(Term* term, char* atom){
+    trace_term("Atom_eq term", term);
+    if(Functor_get(term, atom, 0)){
+        fprintf(stderr, "Atom_eq <- true\n");
+        return true;
+    }else{
+        fprintf(stderr, "Atom_eq <- false\n");
+        return false;
+    }
+}
+
+Term* List_head(Term* list){
+    Term** args = Functor_get(list, ".", 2);
+    if(!args){
+        trace_term("list", list);
+        fatal_error("Expected non-empty list");
+    }
+    return args[0];
+}
+
+Term* List_tail(Term* list){
+    Term** args = Functor_get(list, ".", 2);
+    if(!args){
+        trace_term("list", list);
+        fatal_error("Expected non-empty list");
+    }
+    return args[1];
 }
 
 bool Term_exact_eq(Term* a, Term* b){
@@ -380,7 +482,10 @@ bool Term_exact_eq(Term* a, Term* b){
 }
 
 Term** Assoc_get(Term** assoc, Term* key){
+    trace_term("Assoc_get assoc", *assoc);
+    trace_term("Assoc_get key", key);
     for(Term* list = *assoc; !Atom_eq(list, "[]"); list = List_tail(list)){
+        trace_term("Assoc_get list", list);
         Term** args = Functor_get(List_head(list), ":", 2);
         if(!args) fatal_error("Not an assoc list");
         if(Term_exact_eq(key, args[0])){
@@ -428,32 +533,12 @@ Term* HashTable_find(HashTable* table, Term* key){
     return Assoc_find(assoc, key);
 }
 
+void render_fprintf(FILE* out, char* str){
+    fprintf(out, "%s", str);
+}
+
 void Term_print(Term* term){
-    term = chase(term);
-    switch(term->type){
-    case MOVED:
-        printf("_MOVED");
-        break;
-    case VAR:
-        printf("%s", term->data.ref.name ? term->data.ref.name : "_");
-        break;
-    case INTEGER:
-        printf("%ud", term->data.integer);
-        break;
-    case FUNCTOR:
-        printf("%s", term->data.functor.atom);
-        if(term->data.functor.size){
-            printf("(");
-            for(int i = 0; i < term->data.functor.size; i++){
-                Term_print(term->data.functor.args[i]);
-                if(i + 1 < term->data.functor.size){
-                    printf(", ");
-                }
-            }
-            printf(")");
-        }
-        break;
-    }
+    Term_render(term, (renderer_t)render_fprintf, stdout);
 }
 
 bool prim_print(Term** args){
@@ -479,8 +564,13 @@ Term* Term_copy_rec(Term* term, HashTable* vars){
             Functor_set_arg(copy, i, Term_copy_rec(args[i], vars));
         }
         return copy;
-    case VAR:
-        // TODO
+    case VAR: {
+        Term** copy = HashTable_get(vars, term);
+        if(!*copy){
+            *copy = Var(term->data.ref.name);
+        }
+        return *copy;
+    }
     case MOVED:
         fatal_error("Cannot copy a moved term"); 
         return NULL;
@@ -512,22 +602,93 @@ bool Rule_spec(Term* term, char** name, int* size){
     return false;
 }
 
-void stack_push(char* name, functor_size_t size, Term* term){
-    Term* list = HashTable_find(globals, term);
-    disable_gc();
-    Term* rules = Atom("[]");
-    for(; !Atom_eq(list, "[]"); list = List_tail(list)){
-        Term* rule = List_head(list);
-        rules = Functor2(".", Term_copy(rule), rules);
+void add_undo_var(Term* var){
+    Term** args = Functor_get(stack, "frame", 4);
+    if(!args) return;
+    Term** undo_vars = &args[2];
+    *undo_vars = Functor2(".", var, *undo_vars);
+}
+
+void add_undo_vars(Term* vars){
+    Term** args = Functor_get(stack, "frame", 4);
+    if(!args) return;
+    Term** undo_vars = &args[2];
+    for(; !Atom_eq(vars, "[]"); vars = List_tail(vars)){
+        Term* var = List_head(vars);
+        *undo_vars = Functor2(".", var, *undo_vars);
     }
-    stack = Functor5("frame", term, rules, next_query, Atom("[]"), stack);
+}
+
+void reset_undo_vars(Term* vars){
+    for(; !Atom_eq(vars, "[]"); vars = List_tail(vars)){
+        Term* var = List_head(vars);
+        if(var->type != VAR) fatal_error("cannot reset non-var");
+        var->data.ref.ref = var;
+    }
+}
+
+void stack_push(char* name, functor_size_t size, Term* term){
+    Term* rules = HashTable_find(globals, term);
+    disable_gc();
+    Term* branches = Atom("[]");
+    for(; !Atom_eq(rules, "[]"); rules = List_tail(rules)){
+        Term* head = Term_copy(List_head(rules));
+        Term* branch;
+        Term** args = Functor_get(head, ":-", 2);
+        if(args){
+            branch = Functor2(",", Functor2("=", term, args[0]), args[1]);
+        }else{
+            branch = Functor2("=", term, head);
+        }
+        branches = Functor2(".", branch, branches);
+    }
+    if(Atom_eq(branches, "[]")){
+        fatal_error("no such predicate");
+    }
+    if(!next_query){
+        next_query = Atom("true");
+    }
+    stack = Functor4("frame", branches, next_query , Atom("[]"), stack);
     next_query = NULL;
     enable_gc();
 }
 
 bool stack_next(bool success){
-    // TODO
-    return 3;
+    if(Atom_eq(stack, "empty")){
+        return false;
+    }
+    Term** args = Functor_get(stack, "frame", 4);
+    if(!args){
+        fatal_error("stack should be empty/0 or frame/4");
+    }
+    Term** branches = &args[0];
+    Term* saved_next_query = args[1];
+    Term** vars = &args[2];
+    Term* parent = args[3];
+    if(success){
+        disable_gc();
+        stack = parent;
+        add_undo_vars(*vars);
+        enable_gc();
+        next_query = saved_next_query;
+        return true;
+    }else{
+        reset_undo_vars(*vars);
+        *vars = Atom("[]");
+        Term** car_cdr = Functor_get(*branches, ".", 2);
+        if(car_cdr){
+            if(Atom_eq(car_cdr[1], "[]")){
+                stack = parent;
+            }else{
+                *branches = car_cdr[1];
+            }
+            next_query = car_cdr[0];
+            return true;
+        }else{
+            stack = parent;
+            return stack_next(false);
+        }
+    }
 }
 
 prim_t find_prim(char* name, functor_size_t size){
