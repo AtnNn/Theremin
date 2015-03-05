@@ -59,6 +59,8 @@ typedef struct {
 #define MIN(a,b) ((a) < (b) ? a : b)
 #define MAX(a,b) ((a) < (b) ? b : a)
 
+void trace_term(char* str, Term* term);
+
 Buffer* Buffer_new(size_t size){
     Buffer* buffer = malloc(sizeof(Buffer));
     buffer->size = size;
@@ -114,10 +116,17 @@ Pool* Pool_new(){
     return pool;
 }
 
+void trace_pool_info(char* str, Pool* pool){
+    fprintf(stderr, "%s: %zu used, %zu available in %zu sections\n",
+            str,  pool->free, pool->sections * POOL_SECTION_SIZE,
+            pool->sections);
+}
+
 void Term_destroy(Term* term){
     switch(term->type){
-    case VAR:
     case MOVED:
+        return;
+    case VAR:
         free(term->data.ref.name);
         break;
     case FUNCTOR:
@@ -130,6 +139,7 @@ void Term_destroy(Term* term){
 }
 
 void Pool_free(Pool* pool){
+    trace_pool_info("freeing", pool);
     for(size_t i = 0; i < pool->sections; i++){
         for(size_t j = 0; j < POOL_SECTION_SIZE; j++){
             Term_destroy(&pool->terms[i][j]);
@@ -141,9 +151,11 @@ void Pool_free(Pool* pool){
 }
 
 void Pool_expand(Pool* pool){
+    trace_pool_info("expanding", pool);
     pool->sections++;
     pool->terms = realloc(pool->terms, sizeof(Term*) * pool->sections);
     pool->terms[pool->sections-1] = malloc(sizeof(Term) * POOL_SECTION_SIZE);
+    trace_pool_info("expanded", pool);
 }
 
 Term* Pool_add_term_expand(Pool* pool){
@@ -164,8 +176,6 @@ void Pool_pour(Term** term, Pool *pool){
         (*term)->data.ref.ref = new;
         *term = new;
         switch(new->type){
-        case MOVED:
-            break; // impossible
         case VAR:
             Pool_pour(&new->data.ref.ref, pool);
             break;
@@ -176,18 +186,24 @@ void Pool_pour(Term** term, Pool *pool){
             break;
         case INTEGER:
             break;
+        case MOVED:
+            UNREACHABLE;
         }
     }
 }
 
 void Pool_pour_table(HashTable* table, Pool* new){
     for(size_t i = 0; i < table->size; i++){
-        Pool_pour(&table->table[i], new);
+        if(table->table[i]){
+            Pool_pour(&table->table[i], new);
+        }
     }
 }
 
 void gc(Pool* pool){
+    trace_pool_info("start gc", pool);
     Pool *new = Pool_new();
+    trace_pool_info("new pool", new);
     Pool_pour_table(globals, new);
     Pool_pour(&stack, new);
     Pool_pour(&query, new);
@@ -197,6 +213,7 @@ void gc(Pool* pool){
     Pool_free(pool);
     Pool_expand(new);
     pool = new;
+    trace_pool_info("finished gc", pool);
 }
 
 void disable_gc(){
@@ -272,27 +289,27 @@ Term* Functor2(char* atom, Term* a, Term* b){
 Term* Functor3(char* atom, Term* a, Term* b, Term* c){
     Term* term = Functor_unsafe(atom, 3);
     Functor_set_arg(term, 0, a);
-    Functor_set_arg(term, 2, b);
-    Functor_set_arg(term, 3, c);
+    Functor_set_arg(term, 1, b);
+    Functor_set_arg(term, 2, c);
     return term;
 }
 
 Term* Functor4(char* atom, Term* a, Term* b, Term* c, Term* d){
     Term* term = Functor_unsafe(atom, 4);
     Functor_set_arg(term, 0, a);
-    Functor_set_arg(term, 2, b);
-    Functor_set_arg(term, 3, c);
-    Functor_set_arg(term, 4, d);
+    Functor_set_arg(term, 1, b);
+    Functor_set_arg(term, 2, c);
+    Functor_set_arg(term, 3, d);
     return term;
 }
 
 Term* Functor5(char* atom, Term* a, Term* b, Term* c, Term* d, Term* e){
     Term* term = Functor_unsafe(atom, 5);
     Functor_set_arg(term, 0, a);
-    Functor_set_arg(term, 2, b);
-    Functor_set_arg(term, 3, c);
-    Functor_set_arg(term, 4, d);
-    Functor_set_arg(term, 5, e);
+    Functor_set_arg(term, 1, b);
+    Functor_set_arg(term, 2, c);
+    Functor_set_arg(term, 3, d);
+    Functor_set_arg(term, 4, e);
     return term;
 }
 
@@ -352,15 +369,6 @@ Term* Spec(char* atom, int size){
     disable_gc();
     return Functor2("/", Atom(atom), Integer(size));
     enable_gc();
-}
-
-Term** Functor_get(Term* term, char* atom, functor_size_t size){
-    if(term->type != FUNCTOR ||
-       strcmp(term->data.functor.atom, atom) ||
-       term->data.functor.size != size){
-        return NULL;
-    }
-    return term->data.functor.args;
 }
 
 void Buffer_append(Buffer* buffer, char* str){
@@ -423,15 +431,22 @@ void trace_term(char* str, Term* term){
     Buffer_free(buffer);
 }
 
+Term** Functor_get(Term* term, char* atom, functor_size_t size){
+    if(term->type != FUNCTOR ||
+       strcmp(term->data.functor.atom, atom) ||
+       term->data.functor.size != size){
+        return NULL;
+    }
+    return term->data.functor.args;
+}
+
 bool Atom_eq(Term* term, char* atom){
-    trace_term("Atom_eq term", term);
-    if(Functor_get(term, atom, 0)){
-        fprintf(stderr, "Atom_eq <- true\n");
-        return true;
-    }else{
-        fprintf(stderr, "Atom_eq <- false\n");
+    if(term->type != FUNCTOR ||
+       strcmp(term->data.functor.atom, atom) ||
+       term->data.functor.size != 0){
         return false;
     }
+    return true;
 }
 
 Term* List_head(Term* list){
@@ -460,13 +475,13 @@ bool Term_exact_eq(Term* a, Term* b){
     }
     switch(a->type){
     case MOVED:
-        fatal_error("Foudn a moved term when comparing terms");
+        fatal_error("Found a moved term when comparing terms");
     case VAR:
         return a == b;
     case INTEGER:
         return a->data.integer == b->data.integer;
     case FUNCTOR:
-        if(a->data.functor.atom != b->data.functor.atom){
+        if(strcmp(a->data.functor.atom, b->data.functor.atom)){
             return false;
         }
         if(a->data.functor.size != b->data.functor.size){
@@ -482,10 +497,7 @@ bool Term_exact_eq(Term* a, Term* b){
 }
 
 Term** Assoc_get(Term** assoc, Term* key){
-    trace_term("Assoc_get assoc", *assoc);
-    trace_term("Assoc_get key", key);
     for(Term* list = *assoc; !Atom_eq(list, "[]"); list = List_tail(list)){
-        trace_term("Assoc_get list", list);
         Term** args = Functor_get(List_head(list), ":", 2);
         if(!args) fatal_error("Not an assoc list");
         if(Term_exact_eq(key, args[0])){
@@ -530,6 +542,9 @@ void HashTable_append(HashTable* table, Term* key, Term* val){
 
 Term* HashTable_find(HashTable* table, Term* key){
     Term *assoc = table->table[hash(key) % table->size];
+    if(!assoc){
+        return NULL;
+    }
     return Assoc_find(assoc, key);
 }
 
@@ -555,8 +570,7 @@ Term* Term_copy_rec(Term* term, HashTable* vars){
     switch(term->type){
     case INTEGER:
         return term;
-    case FUNCTOR:
-        gc(pool);
+    case FUNCTOR:{
         functor_size_t size = term->data.functor.size;
         Term** args = term->data.functor.args;
         Term* copy = Functor_unsafe(term->data.functor.atom, size);
@@ -564,6 +578,7 @@ Term* Term_copy_rec(Term* term, HashTable* vars){
             Functor_set_arg(copy, i, Term_copy_rec(args[i], vars));
         }
         return copy;
+    }
     case VAR: {
         Term** copy = HashTable_get(vars, term);
         if(!*copy){
@@ -628,7 +643,12 @@ void reset_undo_vars(Term* vars){
 }
 
 void stack_push(char* name, functor_size_t size, Term* term){
-    Term* rules = HashTable_find(globals, term);
+    disable_gc();
+    Term* rules = HashTable_find(globals, Spec(name, size));
+    enable_gc();
+    if(!rules){
+        fatal_error("No such predicate '%s/%u'", name, size);
+    }
     disable_gc();
     Term* branches = Atom("[]");
     for(; !Atom_eq(rules, "[]"); rules = List_tail(rules)){
@@ -643,7 +663,7 @@ void stack_push(char* name, functor_size_t size, Term* term){
         branches = Functor2(".", branch, branches);
     }
     if(Atom_eq(branches, "[]")){
-        fatal_error("no such predicate");
+        fatal_error("No rules for predicate '%s/%u'", name, size);
     }
     if(!next_query){
         next_query = Atom("true");
@@ -654,6 +674,10 @@ void stack_push(char* name, functor_size_t size, Term* term){
 }
 
 bool stack_next(bool success){
+    // fprintf(stderr, "stack_next(%d)\n", success);
+    // trace_term("stack_next stack", stack);
+    // trace_term("stack_next next_query",
+    //            next_query ? next_query : Var("NULL"));
     if(Atom_eq(stack, "empty")){
         return false;
     }
@@ -678,17 +702,66 @@ bool stack_next(bool success){
         Term** car_cdr = Functor_get(*branches, ".", 2);
         if(car_cdr){
             if(Atom_eq(car_cdr[1], "[]")){
-                stack = parent;
+                stack = parent; 
+                next_query = Functor2(",", car_cdr[0], saved_next_query);
             }else{
                 *branches = car_cdr[1];
+                next_query = car_cdr[0];
             }
-            next_query = car_cdr[0];
             return true;
         }else{
             stack = parent;
             return stack_next(false);
         }
     }
+}
+
+void set_var(Term* a, Term* b){
+    if(a->type != VAR) fatal_error("Called set_var on non-var");
+    if(a->data.ref.ref != a) fatal_error("Cannot overwrite variable's value");
+    a->data.ref.ref = b;
+    add_undo_var(a);
+}
+
+bool unify(Term* a, Term* b){
+    a = chase(a);
+    b = chase(b);
+    if(a->type == VAR){
+        set_var(a, b);
+        return true;
+    }
+    if(b->type == VAR){
+        set_var(b, a);
+        return true;
+    }
+    if(a->type != b->type){
+        return false;
+    }
+    switch(a->type){
+    case INTEGER:
+        return a->data.integer == b->data.integer;
+    case FUNCTOR:
+        if(strcmp(a->data.functor.atom, b->data.functor.atom)){
+            return false;
+        }
+        if(a->data.functor.size != b->data.functor.size){
+            return false;
+        }
+        for(int i = 0; i < a->data.functor.size; i++){
+            if(!unify(a->data.functor.args[i], b->data.functor.args[i])){
+                return false;
+            }
+        }
+        return true;
+    case MOVED:
+        fatal_error("Cannot unify a moved term");
+    case VAR:
+        UNREACHABLE;
+    }
+}
+
+bool prim_unify(Term** args){
+    return unify(args[0], args[1]);
 }
 
 prim_t find_prim(char* name, functor_size_t size){
@@ -698,13 +771,18 @@ prim_t find_prim(char* name, functor_size_t size){
     if(!strcmp(name, "fail") && size == 0){
         return prim_fail;
     }
+    if(!strcmp(name, "=") && size == 2){
+        return prim_unify;
+    }
     return NULL;
 }
 
 bool eval(){
-    bool success = true;
     while(true){
+        bool success = true;
         Term* term = chase(query);
+        //trace_term("eval stack", stack);
+        //trace_term("eval term", term);
         switch(term->type){
         case INTEGER:
             fatal_error("Cannot eval integer");
@@ -731,9 +809,11 @@ bool eval(){
                 success = prim(args);
             }else{
                 stack_push(atom, size, term);
+                success = false;
             }
             if(!success || !next_query){
                 if(!stack_next(success)){
+                    //trace_term("eval stack", stack);
                     return success;
                 }
             }
