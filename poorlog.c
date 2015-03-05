@@ -18,7 +18,7 @@
 
 typedef uint32_t hash_t;
 typedef uint8_t functor_size_t;
-typedef int32_t integer_t;
+typedef int64_t integer_t;
 typedef void (*renderer_t)(void*, char*);
 typedef struct Term {
     enum { FUNCTOR, VAR, MOVED, INTEGER } type;
@@ -398,7 +398,7 @@ void Term_render(Term* term, void(*write)(void*, char*), void* data){
         break;
     case INTEGER: {
         char buf[16];
-        sprintf(buf, "%d", term->data.integer);
+        sprintf(buf, "%ld", term->data.integer);
         write(data, buf);
         break;
     }
@@ -580,7 +580,7 @@ Term* Term_copy_rec(Term* term, HashTable* vars){
         return copy;
     }
     case VAR: {
-        Term** copy = HashTable_get(vars, term);
+        Term** copy = HashTable_get(vars, Integer((integer_t)term));
         if(!*copy){
             *copy = Var(term->data.ref.name);
         }
@@ -764,6 +764,11 @@ bool prim_unify(Term** args){
     return unify(args[0], args[1]);
 }
 
+bool prim_nl(Term** args){
+    printf("\n");
+    return true;
+}
+
 prim_t find_prim(char* name, functor_size_t size){
     if(!strcmp(name, "print") && size == 1){
         return prim_print;
@@ -773,6 +778,9 @@ prim_t find_prim(char* name, functor_size_t size){
     }
     if(!strcmp(name, "=") && size == 2){
         return prim_unify;
+    }
+    if(!strcmp(name, "nl") && size == 0){
+        return prim_nl;
     }
     return NULL;
 }
@@ -832,13 +840,25 @@ int main(){
     vars = HashTable_new(COLLISION_HASHTABLE_SIZE);
     stack = Atom("empty");
 
-    Term* pred = Functor2("foo", Atom("bar"), Atom("baz"));
-    HashTable_append(globals, Spec("foo", 2), pred);
+    Term* A = Var("A");
+    Term* B = Var("B");
+    Term* or1 = Functor2(":-", Functor2(";", A, Var("_")), A);
+    Term* or2 = Functor2(":-", Functor2(";", Var("_"), B), B);
+    HashTable_append(globals, Spec(";", 2), or1);
+    HashTable_append(globals, Spec(";", 2), or2);
 
     Term* X = Var("X");
     query = Functor2(",",
-                     Functor2("foo", Atom("bar"), X),
-                     Functor1("print", X));
+                     Functor2(";",
+                              Functor2(",",
+                                       Functor2("=", X, Integer(1)),
+                                       Functor2(",",
+                                                Functor1("print", X),
+                                                Atom("fail"))),
+                              Functor2("=", X, Integer(2))),
+                     Functor2(",",
+                              Functor1("print", X),
+                              Atom("nl")));
 
     enable_gc();
 
