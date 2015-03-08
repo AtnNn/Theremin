@@ -5,11 +5,14 @@
 #include <stdbool.h>
 #include <string.h>
 #include <stdarg.h>
+#include <ctype.h>
 
 #define GLOBALS_SIZE 4096
 #define POOL_SECTION_SIZE 4096
 #define COLLISION_HASHTABLE_SIZE 256
+#define OPS_HASHTABLE_SIZE 256
 #define DEFAULT_BUFFER_SIZE 1024
+#define MAX_NO_PAREN_TERMS 1024
 
 #define HASH_INIT 2166136261
 #define HASH_PRIME 16777619
@@ -60,6 +63,7 @@ typedef struct {
 #define MAX(a,b) ((a) < (b) ? b : a)
 
 void trace_term(char* str, Term* term);
+Term* parse_term(char** str);
 
 Buffer* Buffer_new(size_t size){
     Buffer* buffer = malloc(sizeof(Buffer));
@@ -87,9 +91,13 @@ HashTable* HashTable_new(size_t size){
     return table;
 }
 
+void HashTable_free(HashTable* table){
+    free(table);
+}
+
 Pool* pool = NULL;
 HashTable* globals = NULL;
-HashTable* vars = NULL;
+HashTable* ops = NULL;
 Term* stack = NULL;
 Term* query = NULL;
 Term* next_query = NULL;
@@ -205,6 +213,7 @@ void gc(Pool* pool){
     Pool *new = Pool_new();
     trace_pool_info("new pool", new);
     Pool_pour_table(globals, new);
+    Pool_pour_table(ops, new);
     Pool_pour(&stack, new);
     Pool_pour(&query, new);
     if(next_query){
@@ -348,11 +357,14 @@ hash_t hash_rec(Term* term, hash_t hash){
         hash = hash_string(term->data.functor.atom, hash);
         functor_size_t size = term->data.functor.size;
         if(size){
-
+            hash = hash_byte(size, hash);
+            for(functor_size_t i = 0; i < size; i++){
+                hash = hash_rec(term->data.functor.args[i], hash);
+            }
         }
         return hash;
     case VAR:
-        fatal_error("Cannot hash a variable");
+        fatal_error("Cannot hash variable '%s'", term->data.ref.name);
         return 0;
     case MOVED:
         fatal_error("Cannot hash a moved term");
@@ -388,6 +400,10 @@ Term* chase(Term* term){
 }
 
 void Term_render(Term* term, void(*write)(void*, char*), void* data){
+    if(!term){
+        write(data, "NULL");
+        return;
+    }
     term = chase(term);
     switch(term->type){
     case MOVED:
@@ -438,6 +454,10 @@ Term** Functor_get(Term* term, char* atom, functor_size_t size){
         return NULL;
     }
     return term->data.functor.args;
+}
+
+bool is_Atom(Term* term){
+    return term->type == FUNCTOR && term->data.functor.size == 0;
 }
 
 bool Atom_eq(Term* term, char* atom){
@@ -597,10 +617,11 @@ void HashTable_reset(HashTable* table){
 }
 
 Term* Term_copy(Term* term){
-    HashTable_reset(vars);
+    HashTable* vars = HashTable_new(COLLISION_HASHTABLE_SIZE);
     disable_gc();
     Term* copy = Term_copy_rec(term, vars);
     enable_gc();
+    HashTable_free(vars);
     return copy;
 }
 
@@ -832,13 +853,19 @@ bool eval(){
     }
 }
 
-int main(){
+#define ADD_OP(prec, order, name) HashTable_append(ops, Atom(name), Functor3("op", Integer(prec), Atom(order), Atom(name)));
+
+void define_stdlib(){
     disable_gc();
 
-    pool = Pool_new();
-    globals = HashTable_new(GLOBALS_SIZE);
-    vars = HashTable_new(COLLISION_HASHTABLE_SIZE);
-    stack = Atom("empty");
+    fprintf(stderr, "FOO\n");
+
+    ADD_OP(1200, "xfx", ":-");
+    ADD_OP(1200, "xfx", "-->");
+    ADD_OP(1200, "fx", ":-");
+    ADD_OP(1100, "xfy", ";");
+    ADD_OP(1000, "xfy", ",");
+    ADD_OP(700, "xfx", "=");
 
     Term* A = Var("A");
     Term* B = Var("B");
@@ -846,6 +873,266 @@ int main(){
     Term* or2 = Functor2(":-", Functor2(";", Var("_"), B), B);
     HashTable_append(globals, Spec(";", 2), or1);
     HashTable_append(globals, Spec(";", 2), or2);
+    
+    enable_gc();
+}
+
+bool issymbol(char c){
+    return !isalnum(c) && !isspace(c) && !strchr("(),'.", c) && isprint(c);
+}
+
+char* spaces(char* str){
+    while(isspace(*str)){
+        str++;
+    }
+    return str;
+}
+
+Term* parse_args(char **str, char* name){
+    char* pos = spaces(*str);
+    if(*pos != '('){
+        return NULL;
+    }
+    pos++;
+    disable_gc();
+    Term* list = Atom("[]");
+    functor_size_t count = 0;
+    while(true){
+        Term* term = parse_term(&pos);
+        if(!term){
+            return NULL;
+        }
+        list = Functor2(".", term, list);
+        count++;
+        pos = spaces(pos);
+        if(*pos == ','){
+            pos = spaces(pos + 1);
+        }else if(*pos == ')'){
+            pos++;
+            break; 
+        }else{
+            return NULL;
+        }
+    } 
+    Term* functor = Functor_unsafe(name, count);
+    for(functor_size_t i = 0; i < count; i++){
+        Functor_set_arg(functor, count - i - 1, List_head(list));
+        list = List_tail(list);
+    }
+    enable_gc();
+    *str = pos;
+    return functor;
+}
+
+Term* parse_atomic(char** str){
+    char* start = spaces(*str);
+    char* pos = start;
+    char* end;
+    bool var = false;
+    bool integer = false;
+    integer_t n;
+    if(!*pos){
+        return NULL;
+    }
+    if(isalpha(*pos)){
+        if(isupper(*pos)){
+            var = true;
+        }
+        while(isalpha(*++pos)){ }
+        end = pos;
+    }else if(*pos == '\''){
+        while(*++pos != '\''){ }
+        start++;
+        end = pos++;
+    }else if(issymbol(*pos)){
+        while(issymbol(*++pos)){ }
+        end = pos;
+    }else if(*pos == ','){
+        end = ++pos;
+    }else if(isdigit(*pos)){
+        integer = true;
+        n = atoll(pos);
+        while(isdigit(*++pos)){ }
+        end = pos;
+    }else{
+        return NULL;
+    }
+    Term * term;
+    if(integer){
+        term = Integer(n);
+    }else{
+        const size_t max = 1024;
+        size_t len = end - start;
+        if(len > max){
+            fatal_error("Term longer than 1024 characters");
+        }
+        char buf[max + 1];
+        memcpy(buf, start, len);
+        buf[len] = 0;
+        term = var ? Var(buf) : Atom(buf);
+    }
+    *str = pos;
+    return term;
+}
+
+Term* parse_simple_term(char** str){
+    disable_gc();
+    char* pos = *str;
+    Term* atom = parse_atomic(&pos);
+    if(!atom){
+        return atom;
+    }
+    if(atom->type == FUNCTOR && atom->data.functor.size == 0){
+        Term* functor = parse_args(&pos, atom->data.functor.atom);
+        if(functor){
+            *str = pos;
+            enable_gc();
+            trace_term("simple", functor);
+            return functor;
+        }
+    }
+    *str = pos;
+    enable_gc();
+    trace_term("simple", atom);
+    return atom;
+}
+
+void op_type(integer_t prec, char* spec, integer_t *left, integer_t *right){
+    char *r = spec + 2;
+    switch(spec[0]){
+    case 'x': *left = prec; break;
+    case 'y': *left = prec - 1; break;
+    case 'f': r = spec + 1; break;
+    default: fatal_error("invalid op spec '%s'", spec);
+    }
+    switch(*r){
+    case 'x': *right = prec; break;
+    case 'y': *right = prec - 1; break;
+    default: fatal_error("invalid op spec '%s'", spec);
+    }
+}
+
+Term* combine_terms(integer_t prec, Term*** terms){
+    Term** pos = *terms;
+    trace_term("start at", *pos);
+    if(!*pos){
+        return NULL;
+    }
+    Term* left_term = NULL;
+    while(true){
+        trace_term("begin loop *pos", *pos);
+        if(!*pos){
+            *terms = pos;
+            return left_term;
+        }
+        Term* ret = NULL;
+        Term** ret_pos = NULL;
+        integer_t ret_right_prec = 0;
+        Term* list = is_Atom(*pos) ? HashTable_find(ops, *pos) : NULL;
+        if(!list){
+            if(!left_term){
+                left_term = *pos++;
+                if(!*pos){
+                    *terms = pos;
+                    return left_term;
+                }
+                list = is_Atom(*pos) ? HashTable_find(ops, *pos) : NULL;
+                if(!list){
+                    return NULL;
+                }
+            }else{
+                *terms = pos;
+                return left_term;
+            }
+        }
+        trace_term("left_term", left_term);
+        trace_term("op list", list);
+        char* name = (*pos)->data.functor.atom;
+        for(; !Atom_eq(list, "[]"); list = List_tail(list)){
+            Term* op = List_head(list);
+            trace_term("using op_spec", op);
+            Term** args = Functor_get(op, "op", 3);
+            if(!args || !args[0]->type == INTEGER || args[1]->type != FUNCTOR){
+                fatal_error("invalid entry in ops table");
+            }
+            integer_t left_prec, right_prec;
+            char* op_spec = args[1]->data.functor.atom;
+            op_type(args[0]->data.integer, op_spec, &left_prec, &right_prec);
+            if((left_prec && !left_term) || (left_term && !left_prec)){
+                continue;
+            }
+            if(left_prec > prec){
+                continue;
+            }
+            Term* right_term = NULL;
+            Term** cur = pos + 1; 
+            if(right_prec){
+                right_term = combine_terms(right_prec, &cur);
+                trace_term("combined right", right_term);
+                if(!right_term){
+                    continue;
+                }
+            }
+            if(ret){
+                return NULL; // Reject possibly ambiguous parse
+            }
+            ret = !right_prec ? Functor1(name, left_term) :
+                !left_prec ? Functor1(name, right_term) :
+                Functor2(name, left_term, right_term);
+            ret_pos = cur;
+            ret_right_prec = right_prec;
+        }
+        if(!ret){
+            if(left_term){
+                *terms = pos;
+                return left_term;
+            }
+            return NULL;
+        }
+        left_term = ret;
+        pos = ret_pos;
+    }
+}
+
+Term* parse_term(char** str){
+    char* pos = *str;
+    Term* terms[MAX_NO_PAREN_TERMS + 1];
+    size_t i = 0;
+    disable_gc();
+    while(true){
+        pos = spaces(pos);
+        Term* term = parse_simple_term(&pos);
+        if(!term){
+            break;
+        }
+        if(i == MAX_NO_PAREN_TERMS){
+            fatal_error("Over 1024 non-parenthesized terms and operators");
+        }
+        terms[i++] = term; 
+    }
+    enable_gc();
+    if(i == 0){
+        return NULL;
+    }
+    terms[i] = NULL;
+    Term** ref = terms;
+    Term* term = combine_terms(1200, &ref);
+    if(!term || *ref){
+        return NULL;
+    }
+    *str = pos;
+    return term;
+}
+
+int main(){
+    disable_gc();
+
+    pool = Pool_new();
+    globals = HashTable_new(GLOBALS_SIZE);
+    ops = HashTable_new(OPS_HASHTABLE_SIZE);
+    stack = Atom("empty");
+
+    define_stdlib();
 
     Term* X = Var("X");
     query = Functor2(",",
@@ -859,6 +1146,9 @@ int main(){
                      Functor2(",",
                               Functor1("print", X),
                               Atom("nl")));
+
+    char* str = "f:- !,a;b;c";
+    query = Functor1("print", parse_term(&str));
 
     enable_gc();
 
