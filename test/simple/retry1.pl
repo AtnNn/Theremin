@@ -1,4 +1,4 @@
 f(a).
 f(b).
 f(c).
-:-f(X),print(X),fail;true.
+:-f(X),print(X),fail;nl.
