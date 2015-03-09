@@ -6,11 +6,15 @@
 #include <string.h>
 #include <stdarg.h>
 #include <ctype.h>
+#include <errno.h>
+#include <unistd.h>
 
 #define DEBUG_EVAL 0
 #define DEBUG_PARSE 0
 #define DEBUG_GC 0
 #define DEBUG_HASHTABLE 0
+
+#define PRELUDE_PATH "boot/prelude.pl"
 
 #define GLOBALS_SIZE 4096
 #define POOL_SECTION_SIZE 4096
@@ -101,6 +105,7 @@ Buffer* Buffer_new(size_t size){
     buffer->pos = 0;
     buffer->str = malloc(size + 1);
     buffer->str[0] = 0;
+    buffer->str[size] = 0;
     return buffer;
 }
 
@@ -110,8 +115,9 @@ void Buffer_free(Buffer* buffer){
 }
 
 void Buffer_resize(Buffer* buffer, size_t size){
-    buffer->str = realloc(buffer->str, size);
+    buffer->str = realloc(buffer->str, size + 1);
     buffer->size = size;
+    buffer->str[size] = 0;
 }
 
 HashTable* HashTable_new(size_t size){
@@ -137,6 +143,7 @@ HashTable* ops = NULL;
 Term* stack = NULL;
 Term* query = NULL;
 Term* next_query = NULL;
+Term* keep = NULL;
 int gc_disable_count = 0;
 bool would_gc = false;
 
@@ -255,6 +262,9 @@ void gc(Pool* pool){
     Pool_pour(&query, new);
     if(next_query){
         Pool_pour(&next_query, new);
+    }
+    if(keep){
+        Pool_pour(&keep, new);
     }
     Pool_free(pool);
     Pool_expand(new);
@@ -1081,7 +1091,6 @@ void op_type(integer_t prec, char* spec, integer_t *left, integer_t *right){
 }
 
 Term* combine_terms(integer_t prec, Term*** terms){
-    D_PARSE{ fprintf(stderr, "combining\n"); }
     Term** pos = *terms;
     Term* left_term = NULL;
     while(true){
@@ -1094,7 +1103,6 @@ Term* combine_terms(integer_t prec, Term*** terms){
         Term** ret_pos = NULL;
         Term* list = is_Atom(*pos) ? HashTable_find(ops, *pos) : NULL;
         if(!list){
-            D_PARSE{ trace_term("not an operator", *pos); }
             if(!left_term){
                 left_term = *pos++;
                 if(!*pos){
@@ -1103,7 +1111,6 @@ Term* combine_terms(integer_t prec, Term*** terms){
                 }
                 list = is_Atom(*pos) ? HashTable_find(ops, *pos) : NULL;
                 if(!list){
-                    D_PARSE{ trace_term("not an operator", *pos); }
                     *terms = pos;
                     return left_term;
                 }
@@ -1114,7 +1121,6 @@ Term* combine_terms(integer_t prec, Term*** terms){
             }
         }
         char* name = (*pos)->data.functor.atom;
-        D_PARSE{ fprintf(stderr, "operator name: %s\n", name); }
         for(; !Atom_eq(list, "[]"); list = List_tail(list)){
             Term* op = List_head(list);
             D_PARSE{ trace_term("trying op", op); }
@@ -1182,14 +1188,26 @@ Term* parse_term_vars(char** str, HashTable* vars, bool comma_ok){
     D_PARSE{
         size_t size = 20;
         char buf[size + 1];
-        size_t i = 0;
-        for(; i < size && pos[i]; i++){
-            buf[i] = pos[i];
+        size_t j = 0;
+        bool space = true;
+        for(size_t i = 0; j < size && pos[i]; i++){
+            char c = pos[i];
+            if(isspace(c)){
+                if(space){
+                    continue;
+                }else{
+                    c = ' ';
+                    space = true;
+                }
+            }else{
+                space = false;
+            }
+            buf[j++] = c;
         }
-        if(i == size){
+        if(j == size){
             strcpy(buf + size - 3, "...");
         }
-        buf[i] = 0;
+        buf[j] = 0;
         fprintf(stderr, "parsing substr: %s\n", buf);
     }
     Term* terms[MAX_NO_PAREN_TERMS + 1];
@@ -1256,7 +1274,8 @@ Term* parse_term(char* str){
 Term* parse_toplevel(char* str){
     char* pos = spaces(str);
     disable_gc();
-    Term* list = Atom("[]");
+    Term* list = NULL;
+    Term** rest = &list;
     for(; *pos; pos = spaces(pos)){
         Term* term = parse_term_partial(&pos);
         if(!term){
@@ -1265,9 +1284,12 @@ Term* parse_toplevel(char* str){
         pos = spaces(pos);
         if(*pos != '.'){
             return NULL;
-        } 
-        list = Functor2(".", term, list);
+        }
+        pos++;
+        *rest = Functor2(".", term, NULL);
+        rest = &(*rest)->data.functor.args[1];
     }
+    *rest = Atom("[]");
     enable_gc();
     return list;
 }
@@ -1281,8 +1303,7 @@ void eval_toplevel(Term* term){
     if(args){
         query = args[0];
         if(!eval_query()){
-            trace_term("directive", query);
-            fatal_error("failed directive");
+            trace_term("failed directive", query);
         }
         return;
     }
@@ -1298,7 +1319,27 @@ void eval_toplevel(Term* term){
     HashTable_append(globals, Spec(term->data.functor.atom, term->data.functor.size), term);
 }
 
-void define_stdlib(){
+Term* parse_file(char* path){
+    FILE* fp = fopen(path, "r");
+    if(!fp){
+        fatal_error("could not open '%s': %s", path, strerror(errno));
+    }
+    fseek(fp, 0, SEEK_END);
+    size_t size = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+
+    Buffer* data = Buffer_new(size);
+    fread(data->str, size, 1, fp);
+    fclose(fp);
+
+    Term* list = parse_toplevel(data->str);
+
+    Buffer_free(data);
+
+    return list;
+}
+
+void load_prelude(){
     disable_gc();
 
 #define ADD_OP(prec, order, name) \
@@ -1311,28 +1352,67 @@ void define_stdlib(){
     ADD_OP(700, "xfx", "=");
 #undef ADD_OP
 
-    eval_toplevel(parse_term("A ; _ :- A"));
-    eval_toplevel(parse_term("_ ; B :- B"));
-
     enable_gc();
+
+    keep = parse_file(PRELUDE_PATH);
+    for(; !Atom_eq(keep, "[]"); keep = List_tail(keep)){
+        eval_toplevel(List_head(keep));
+    }
+    keep = NULL;
+}
+
+void eval_stdin(){
+    Buffer* buffer = Buffer_new(4096);
+    while(true){
+        if(buffer->size == buffer->pos){
+            Buffer_resize(buffer, buffer->size * 2);
+        }
+        ssize_t n = read(0, buffer->str + buffer->pos, buffer->size - buffer->pos);
+        if(n < 0){
+            fatal_error("read error: %s", strerror(errno));
+        }
+        if(!n){
+            if(buffer->pos){
+                fatal_error("could not parse: %s", buffer->str);
+            }
+            return;
+        }
+        buffer->pos += n;
+        buffer->str[buffer->pos] = 0;
+
+        char* pos = buffer->str;
+        char* next = NULL;
+        while(true){
+            Term* term = parse_term_partial(&pos);
+            if(!term){
+                break;
+            }
+            pos = spaces(pos);
+            if(*pos != '.'){
+                break;
+            }
+            pos++;
+            pos = spaces(pos);
+            next = pos;
+            eval_toplevel(term);
+        }
+        if(next){
+            size_t remaining = buffer->pos - (next - buffer->str);
+            memmove(buffer->str, next, remaining + 1);
+            buffer->pos = remaining;
+        }
+    }
 }
 
 int main(){
-    disable_gc();
-
     pool = Pool_new();
     globals = HashTable_new(GLOBALS_SIZE);
     ops = HashTable_new(OPS_HASHTABLE_SIZE);
     stack = Atom("empty");
 
-    define_stdlib();
+    load_prelude();
 
-    char* str = "(X=1, print(X), fail; X=2), print(X)";
-    query = parse_term(str);
+    eval_stdin();
 
-    trace_term("query", query);
-
-    enable_gc();
-
-    eval_query();
+    return 0;
 }
