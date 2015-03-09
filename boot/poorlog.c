@@ -575,6 +575,11 @@ Term** Assoc_get(Term** assoc, Term* key){
         Term** args = Functor_get(List_head(list), ":", 2);
         if(!args) fatal_error("Not an assoc list");
         if(Term_exact_eq(key, args[0])){
+            D_HASHTABLE{
+                if(Atom_eq(args[1], "[]")){
+                    trace_term("hash collision", key);
+                }
+            }
             return &args[1]; 
         }
     }
@@ -935,10 +940,18 @@ bool issymbol(char c){
 }
 
 char* spaces(char* str){
-    while(isspace(*str)){
-        str++;
+    while(true){
+        if(isspace(*str)){
+            str++;
+        }else if(*str == '%'){
+            str++;
+            while(*str && *str != '\n'){
+                str++;
+            }
+        }else{
+            return str;
+        }
     }
-    return str;
 }
 
 Term* parse_args(char **str, char* name, HashTable* vars){
