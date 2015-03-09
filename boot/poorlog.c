@@ -583,10 +583,10 @@ Term** Assoc_get(Term** assoc, Term* key){
             return &args[1]; 
         }
     }
-    enable_gc();
+    disable_gc();
     Term* pair = Functor2(":", key, NULL);
     *assoc = Functor2(".", pair, *assoc);
-    disable_gc();
+    enable_gc();
     return &pair->data.functor.args[1];
 }
 
@@ -595,6 +595,11 @@ Term* Assoc_find(Term* assoc, Term* key){
         Term** args = Functor_get(List_head(list), ":", 2);
         if(!args) fatal_error("Not an assoc list");
         if(Term_exact_eq(key, args[0])){
+            D_HASHTABLE{
+                if(Atom_eq(args[1], "[]")){
+                    trace_term("hash collision", key);
+                }
+            }
             return args[1];
         }
     }
