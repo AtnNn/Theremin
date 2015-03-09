@@ -403,10 +403,10 @@ hash_t hash_rec(Term* term, hash_t hash){
         return hash;
     case VAR:
         fatal_error("Cannot hash variable '%s'", term->data.ref.name);
-        return 0;
     case MOVED:
         fatal_error("Cannot hash a moved term");
-        return 0;
+    default:
+        UNREACHABLE;
     }
 }
 
@@ -555,6 +555,8 @@ bool Term_exact_eq(Term* a, Term* b){
             }
         }
         return true;
+    default:
+        UNREACHABLE;
     }
 }
 
@@ -670,6 +672,8 @@ Term* Term_copy_rec(Term* term, HashTable* vars){
     case MOVED:
         fatal_error("Cannot copy a moved term"); 
         return NULL;
+    default:
+        UNREACHABLE;
     }
 }
 
@@ -840,6 +844,7 @@ bool unify(Term* a, Term* b){
     case MOVED:
         fatal_error("Cannot unify a moved term");
     case VAR:
+    default:
         UNREACHABLE;
     }
 }
@@ -1087,7 +1092,6 @@ Term* combine_terms(integer_t prec, Term*** terms){
         }
         Term* ret = NULL;
         Term** ret_pos = NULL;
-        integer_t ret_right_prec = 0;
         Term* list = is_Atom(*pos) ? HashTable_find(ops, *pos) : NULL;
         if(!list){
             D_PARSE{ trace_term("not an operator", *pos); }
@@ -1158,7 +1162,6 @@ Term* combine_terms(integer_t prec, Term*** terms){
                 !left_prec ? Functor1(name, right_term) :
                 Functor2(name, left_term, right_term);
             ret_pos = cur;
-            ret_right_prec = right_prec;
         }
         if(!ret){
             if(left_term){
