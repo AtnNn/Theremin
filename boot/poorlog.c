@@ -714,16 +714,16 @@ bool Rule_spec(Term* term, char** name, int* size){
 }
 
 void add_undo_var(Term* var){
-    Term** args = Functor_get(stack, "frame", 4);
+    Term** args = Functor_get(stack, "frame", 3);
     if(!args) return;
-    Term** undo_vars = &args[2];
+    Term** undo_vars = &args[1];
     *undo_vars = Functor2(".", var, *undo_vars);
 }
 
 void add_undo_vars(Term* vars){
-    Term** args = Functor_get(stack, "frame", 4);
+    Term** args = Functor_get(stack, "frame", 3);
     if(!args) return;
-    Term** undo_vars = &args[2];
+    Term** undo_vars = &args[1];
     for(; !Atom_eq(vars, "[]"); vars = List_tail(vars)){
         Term* var = List_head(vars);
         *undo_vars = Functor2(".", var, *undo_vars);
@@ -756,15 +756,15 @@ void stack_push(char* name, functor_size_t size, Term* term){
         }else{
             branch = Functor2("=", term, head);
         }
+        if(next_query){
+            branch = Functor2(",", branch, next_query);
+        }
         branches = Functor2(".", branch, branches);
     }
     if(Atom_eq(branches, "[]")){
         fatal_error("No rules for predicate '%s/%u'", name, size);
     }
-    if(!next_query){
-        next_query = Atom("true");
-    }
-    stack = Functor4("frame", branches, next_query , Atom("[]"), stack);
+    stack = Functor3("frame", branches, Atom("[]"), stack);
     next_query = NULL;
     enable_gc();
 }
@@ -779,20 +779,19 @@ bool stack_next(bool success){
     if(Atom_eq(stack, "empty")){
         return false;
     }
-    Term** args = Functor_get(stack, "frame", 4);
+    Term** args = Functor_get(stack, "frame", 3);
     if(!args){
-        fatal_error("stack should be empty/0 or frame/4");
+        fatal_error("stack should be empty/0 or frame/3");
     }
     Term** branches = &args[0];
-    Term* saved_next_query = args[1];
-    Term** vars = &args[2];
-    Term* parent = args[3];
+    Term** vars = &args[1];
+    Term* parent = args[2];
     if(success){
         disable_gc();
         stack = parent;
         add_undo_vars(*vars);
         enable_gc();
-        next_query = saved_next_query;
+        next_query = Atom("true");
         return true;
     }else{
         reset_undo_vars(*vars);
@@ -801,7 +800,7 @@ bool stack_next(bool success){
         if(car_cdr){
             if(Atom_eq(car_cdr[1], "[]")){
                 stack = parent; 
-                next_query = Functor2(",", car_cdr[0], saved_next_query);
+                next_query = car_cdr[0];
             }else{
                 *branches = car_cdr[1];
                 next_query = car_cdr[0];
@@ -1063,6 +1062,10 @@ Term* parse_simple_term(char** str, HashTable* vars){
     if(!atom){
         return parse_parens(str, vars);
     }
+    if(is_Atom(atom) && HashTable_find(ops, atom)){
+        *str = pos;
+        return atom;
+    }
     if(atom->type == FUNCTOR && atom->data.functor.size == 0){
         Term* functor = parse_args(&pos, atom->data.functor.atom, vars);
         if(functor){
@@ -1183,32 +1186,36 @@ Term* combine_terms(integer_t prec, Term*** terms){
     }
 }
 
+char* short_snippet(char* str, char* buf, size_t size){
+    char* pos = buf;
+    size_t j = 0;
+    bool space = true;
+    for(size_t i = 0; j < size && pos[i]; i++){
+        char c = pos[i];
+        if(isspace(c)){
+            if(space){
+                continue;
+            }else{
+                c = ' ';
+                space = true;
+            }
+        }else{
+            space = false;
+        }
+        buf[j++] = c;
+    }
+    if(j == size){
+        strcpy(buf + size - 3, "...");
+    }
+    buf[j] = 0;
+    return buf;
+}
+
 Term* parse_term_vars(char** str, HashTable* vars, bool comma_ok){
     char* pos = *str; 
     D_PARSE{
-        size_t size = 20;
-        char buf[size + 1];
-        size_t j = 0;
-        bool space = true;
-        for(size_t i = 0; j < size && pos[i]; i++){
-            char c = pos[i];
-            if(isspace(c)){
-                if(space){
-                    continue;
-                }else{
-                    c = ' ';
-                    space = true;
-                }
-            }else{
-                space = false;
-            }
-            buf[j++] = c;
-        }
-        if(j == size){
-            strcpy(buf + size - 3, "...");
-        }
-        buf[j] = 0;
-        fprintf(stderr, "parsing substr: %s\n", buf);
+        char buf[11];
+        fprintf(stderr, "parsing substr: %s\n", short_snippet(pos, buf, 10));
     }
     Term* terms[MAX_NO_PAREN_TERMS + 1];
     size_t i = 0;
@@ -1243,7 +1250,7 @@ Term* parse_term_vars(char** str, HashTable* vars, bool comma_ok){
     if(*ref){
         D_PARSE{
             trace_term("partially combined", term);
-            trace_term("next is", *ref);
+            trace_term("next was", *ref);
         }
         return NULL;
     }
@@ -1303,7 +1310,7 @@ void eval_toplevel(Term* term){
     if(args){
         query = args[0];
         if(!eval_query()){
-            trace_term("failed directive", query);
+            trace_term("failed directive", args[0]);
         }
         return;
     }
