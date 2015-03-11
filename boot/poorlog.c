@@ -1002,7 +1002,7 @@ bool eval_query(){
 }
 
 bool issymbol(char c){
-    return !isalnum(c) && !isspace(c) && !strchr("(),'._", c) && isprint(c);
+    return !isalnum(c) && !isspace(c) && !strchr("()[],'_", c) && isprint(c);
 }
 
 char* spaces(char* str){
@@ -1209,6 +1209,9 @@ Term* parse_simple_term(char** str, HashTable* vars){
         return parse_parens(str, vars);
     case '[':
         return parse_list(str, vars);
+    case '.': {
+        char next = *(pos + 1);
+        if(isspace(next) || !next) return NULL; }
     }
     Term* atom = parse_atomic(&pos, vars);
     if(!atom) return NULL;
@@ -1463,6 +1466,7 @@ void eval_toplevel(Term* term){
         query = args[0];
         if(!eval_query()){
             trace_term("failed directive", args[0]);
+            exit(1);
         }
         return;
     }
@@ -1492,6 +1496,17 @@ Term* parse_file(char* path){
     return list;
 }
 
+void load_file(char* path){
+    keep = parse_file(path);
+    if(!keep){
+        fatal_error("failed to parse file '%s'", path);
+    }
+    for(; !Atom_eq(keep, "[]"); keep = List_tail(keep)){
+        eval_toplevel(List_head(keep));
+    }
+    keep = NULL;
+}
+
 void load_prelude(){
     disable_gc();
 
@@ -1503,20 +1518,76 @@ void load_prelude(){
     ADD_OP(1100, "xfy", ";");
     ADD_OP(1000, "xfy", ",");
     ADD_OP(700, "xfx", "=");
+    ADD_OP(700, "xfx", "=..");
 #undef ADD_OP
 
     enable_gc();
 
-    keep = parse_file(PRELUDE_PATH);
-    for(; !Atom_eq(keep, "[]"); keep = List_tail(keep)){
-        eval_toplevel(List_head(keep));
-    }
-    keep = NULL;
+    load_file(PRELUDE_PATH);
+
     prelude_loaded = true;
 }
 
-void eval_stdin(){
+void list_vars(Term* term, HashTable* vars){
+    switch(term->type){
+    case VAR: {
+        Term** val = HashTable_get(vars, Integer((integer_t)term));
+        if(!*val) *val = term;
+        break; }
+    case FUNCTOR:
+        for(functor_size_t i = 0; i < term->data.functor.size; i++){
+            list_vars(term->data.functor.args[i], vars);
+        }
+        break;
+    default:
+        (void)0;
+    }
+}
+
+Term* vars_of(Term* term){
+    HashTable* vars = HashTable_new(PARSE_VARS_HASHTABLE_SIZE);
+    disable_gc();
+    list_vars(term, vars);
+    Term *list = Atom("[]");
+    for(size_t i = 0; i < vars->size; i++){
+        Term* assoc = vars->table[i];
+        if(assoc){
+            for(; !Atom_eq(assoc, "[]"); assoc = List_tail(assoc)){
+                Term** args = Functor_get(List_head(assoc), ":", 2);
+                Term* var = Var(((Term*)args[0]->data.integer)->data.ref.name);
+                list = Functor2(".", Functor2("=", var, args[1]), list);
+            }
+        }
+    }
+    enable_gc();
+    return list;
+}
+
+void eval_interactive(Term* term){
+    keep = vars_of(term);
+    query = term;
+    if(eval_query()){
+        if(Atom_eq(keep, "[]")){
+            printf("yep.\n");
+        }else{
+            for(; !Atom_eq(keep, "[]"); keep = List_tail(keep)){
+                Buffer* buffer = Term_show(List_head(keep));
+                printf("%s.\n", buffer->str);
+                Buffer_free(buffer);
+            }
+        }
+    }else{
+        printf("nope.\n");
+    }
+}
+
+void eval_stdin(char* prompt, void (*eval)(Term*)){
     Buffer* buffer = Buffer_new(4096);
+    bool term = isatty(0);
+    if(term){
+        printf("%s", prompt);
+        fflush(stdout);
+    }
     while(true){
         if(buffer->size == buffer->pos){
             Buffer_resize(buffer, buffer->size * 2);
@@ -1548,7 +1619,11 @@ void eval_stdin(){
             pos++;
             pos = spaces(pos);
             next = pos;
-            eval_toplevel(term);
+            eval(term);
+            if(term){
+                printf("%s", prompt);
+                fflush(stdout);
+            }
         }
         if(next){
             size_t remaining = buffer->pos - (next - buffer->str);
@@ -1558,7 +1633,7 @@ void eval_stdin(){
     }
 }
 
-int main(){
+int main(int argc, char** argv){
     pool = Pool_new();
     globals = HashTable_new(GLOBALS_SIZE);
     ops = HashTable_new(OPS_HASHTABLE_SIZE);
@@ -1566,9 +1641,52 @@ int main(){
 
     load_prelude();
 
+    char** args = argv + 1;
+    char* arg;
+    char* file = NULL;
+    char* eval = NULL;
+    char usage[] = "usage: poorlog [-e EXPR] [FILE]";
+    while(*args){
+        arg = *args++;
+        if(*arg != '-'){
+            if(!file){
+                file = arg;
+            }else{
+                fatal_error("too many files on command line: %s", arg);
+            }
+            continue;
+        }
+        switch(arg[1]){
+        case 'e':
+            eval = *args++;
+            if(!eval) fatal_error("'-e' requires and argument");
+            break;
+        case 'h':
+            printf("%s\n", usage);
+            break;
+        default:
+            fprintf(stderr,"unknown argument: %s\n%s\n", arg, usage);
+            exit(1);
+        }
+    }
 
+    if(file){
+        if(!strcmp(file, "-")){
+            eval_stdin("| ", eval_toplevel);
+        }else{
+            load_file(file);
+        }
+    }
 
-    eval_stdin();
+    if(eval){
+        Term* term = parse_term(eval);
+        if(!term) fatal_error("Could not parse command-line expression");
+        eval_interactive(term);
+    }
+
+    if(!eval && !file){
+        eval_stdin("?- ", eval_interactive);
+    }
 
     return 0;
 }
