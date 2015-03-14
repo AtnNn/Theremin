@@ -9,7 +9,7 @@
 #include <errno.h>
 #include <unistd.h>
 
-#define PRELUDE_PATH "boot/prelude.pl"
+#define PRELUDE_PATH "boot/stdlib/prelude.pl"
 
 #define GLOBALS_SIZE 4096
 #define POOL_SECTION_SIZE 4096
