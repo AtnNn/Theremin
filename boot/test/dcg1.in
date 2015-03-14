@@ -7,4 +7,4 @@ noun --> [cat].
 noun --> [bat].
 verb --> [eats].
 
-:- sentence(X, []), print(X), nl, fail.
+:- sentence(X, []), print(X), nl, fail; true.

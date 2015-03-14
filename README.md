@@ -95,4 +95,4 @@ languages and projects:
 * Ciao (http://ciao-lang.org/)
 * Idris (http://www.idris-lang.org/)
 * Erlang (http://www.erlang.org/)
-* GCLA
+* GCLA (https://sicstus.sics.se/sicstus/docs/3.7.1/html/sicstus_36.html)
