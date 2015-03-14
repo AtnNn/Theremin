@@ -870,12 +870,12 @@ void reset_undo_vars(Term* vars){
     }
 }
 
-void stack_push(atom_t name, functor_size_t size, Term* term){
+void stack_push(atom_t atom, functor_size_t size, Term* term){
     disable_gc();
-    Term* rules = HashTable_find(globals, Spec(name, size));
+    Term* rules = HashTable_find(globals, Spec(atom, size));
     enable_gc();
     if(!rules){
-        fatal_error("No such predicate '%s/%u'", name, size);
+        fatal_error("No such predicate '%s/%u'", atom_string(atom), size);
     }
     disable_gc();
     Term* branches = Atom(atom_nil);
@@ -894,7 +894,7 @@ void stack_push(atom_t name, functor_size_t size, Term* term){
         branches = Functor2(atom_cons, branch, branches);
     }
     if(Atom_eq(branches, atom_nil)){
-        fatal_error("No rules for predicate '%s/%u'", name, size);
+        fatal_error("No rules for predicate '%s/%u'", atom_string(atom), size);
     }
     stack = Functor3(atom_frame, branches, Atom(atom_nil), stack);
     next_query = NULL;
