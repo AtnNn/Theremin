@@ -80,7 +80,7 @@ typedef struct {
 
 void trace_term(char* str, Term* term, ...);
 Term* parse_term_vars(char** str, HashTable* vars, char* end_char);
-bool assertz(Term* term, bool in_query);
+bool assertz(Term* term);
 Term** HashTable_get(HashTable* table, Term* key);
 Term* HashTable_find(HashTable* table, Term* key);
 
@@ -109,6 +109,7 @@ bool debug_atom = false;
 bool debug_parse = false;
 bool* debug_enabled = &prelude_loaded;
 bool always = true;
+bool evaluating = false;
 
 Buffer* Buffer_new(size_t size){
     Buffer* buffer = malloc(sizeof(Buffer));
@@ -146,6 +147,16 @@ void HashTable_free(HashTable* table){
         fprintf(stderr, "freeing hashtable %p\n", table);
     }
     free(table);
+}
+
+bool error(char* format, ...){
+    va_list argptr;
+    va_start(argptr, format);
+    fprintf(stderr, "error: ");
+    vfprintf(stderr, format, argptr);
+    fprintf(stderr, "\n");
+    va_end(argptr);
+    return false;
 }
 
 void fatal_error(char* format, ...){
@@ -870,12 +881,12 @@ void reset_undo_vars(Term* vars){
     }
 }
 
-void stack_push(atom_t atom, functor_size_t size, Term* term){
+bool stack_push(atom_t atom, functor_size_t size, Term* term){
     disable_gc();
     Term* rules = HashTable_find(globals, Spec(atom, size));
     enable_gc();
     if(!rules){
-        fatal_error("No such predicate '%s/%u'", atom_string(atom), size);
+        return error("No such predicate '%s'/%u", atom_string(atom), size);
     }
     disable_gc();
     Term* branches = Atom(atom_nil);
@@ -894,11 +905,13 @@ void stack_push(atom_t atom, functor_size_t size, Term* term){
         branches = Functor2(atom_cons, branch, branches);
     }
     if(Atom_eq(branches, atom_nil)){
-        fatal_error("No rules for predicate '%s/%u'", atom_string(atom), size);
+        enable_gc();
+        return error("No rules for predicate '%s/%u'", atom_string(atom), size);
     }
     stack = Functor3(atom_frame, branches, Atom(atom_nil), stack);
     next_query = NULL;
     enable_gc();
+    return true;
 }
 
 bool stack_next(bool success){
@@ -1014,7 +1027,7 @@ bool prim_cut(Term** args){
 }
 
 bool prim_assertz(Term** args){
-    return assertz(args[0], true);
+    return assertz(args[0]);
 }
 
 bool prim_univ(Term** args){
@@ -1080,22 +1093,25 @@ prim_t find_prim(atom_t atom, functor_size_t size){
 }
 
 bool eval_query(){
+    if(evaluating){
+        fatal_error("internal error: called eval_query recursively");
+    }
+    evaluating = true;
     while(true){
         bool success = true;
         Term* term = chase(query);
         switch(term->type){
         case INTEGER:
-            fatal_error("Cannot eval integer");
-            break;
+            evaluating = false;
+            return error("Cannot eval integer %ld", term->data.integer);
         case STRING:
-            fatal_error("Cannot eval string");
-            break;
+            evaluating = false;
+            return error("Cannot eval string \"%s\"", term->data.string);
         case VAR:
-            fatal_error("Cannot eval unbound variable");
-            break;
+            evaluating = false;
+            return error("Cannot eval unbound variable '%s'", atom_string(term->data.var.name));
         case MOVED:
             fatal_error("Cannot eval moved term");
-            break;
         case FUNCTOR: {
             atom_t atom = term->data.functor.atom;
             functor_size_t size = term->data.functor.size;
@@ -1114,12 +1130,16 @@ bool eval_query(){
             if(prim){
                 success = prim(args);
             }else{
-                stack_push(atom, size, term);
+                if(!stack_push(atom, size, term)){
+                    evaluating = false;
+                    return false;
+                }
                 success = false;
             }
             if(!success || !next_query){
                 if(!stack_next(success)){
                     D_EVAL{ trace_term("eval stack", stack); }
+                    evaluating = false;
                     return success;
                 }
             }
@@ -1537,7 +1557,7 @@ Term* parse_toplevel(char* str){
     return list;
 }
 
-bool assertz(Term* term, bool in_query){
+bool assertz(Term* term){
     Term** args = Functor_get(term, atom_entails, 2);
     if(args){
         Term* head = chase(args[0]);
@@ -1555,7 +1575,7 @@ bool assertz(Term* term, bool in_query){
     args = Functor_get(term, atom_rarrow, 2);
     if(args){
         Term* q = Functor1(atom_assertz_dcg, term);
-        if(in_query){
+        if(evaluating){
             next_query = next_query ? Functor2(atom_cons, q, next_query) : q;
         }else{
             query = q;
@@ -1582,7 +1602,7 @@ void eval_toplevel(Term* term){
         }
         return;
     }
-    if(!assertz(term, false)){
+    if(!assertz(term)){
         trace_term("top-level term", term);
         fatal_error("failed to assertz term");
     }
@@ -1712,6 +1732,9 @@ void eval_stdin(char* prompt, void (*eval)(Term*)){
         if(!n){
             if(buffer->pos){
                 fatal_error("could not parse: %s", buffer->str);
+            }
+            if(term){
+                printf("\n");
             }
             return;
         }
