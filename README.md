@@ -78,3 +78,4 @@ languages and projects:
 * GCLA (https://sicstus.sics.se/sicstus/docs/3.7.1/html/sicstus_36.html)
 * Dafny (http://research.microsoft.com/en-us/projects/dafny/)
 * SAW (http://saw.galois.com/)
+* Infer (http://fbinfer.com/)
