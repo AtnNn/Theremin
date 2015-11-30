@@ -48,6 +48,12 @@ goal of Theremin is to be useful for everyday programmers. It will
 therefor need a good foreign language interface and be able to parse
 and analyse code written in at least one mainstream language.
 
+## Other Ideas
+
+* Controlling abstraction level and allowed implicit operations, such as overload resolution, memory allocation, memory layout and implicit conversion.
+* Storing program annotations and proofs separately
+* Antiquotes in DSL
+
 ## Authors
 
 I am currently the sole author of Theremin. I use to experiment with
