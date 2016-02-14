@@ -10,7 +10,7 @@ Theremin is a research project for experimenting with:
 * 80x25 programming
 
 Theremin is in a very early stage of development. The code in this
-repository currently only contains an evaluator for a prolog-like
+repository currently only contains an interpreter for a prolog-like
 language.
 
 If you are interested in these ideas, join me on irc.freenode.net #theremin
@@ -59,11 +59,10 @@ mainstream programming languages.
 
 ## Code search and versioning
 
-A detailed predicate about a function could describe the arguments,
-the return value, the time complexity and the side effects. Such a
-predicate could be used as query. The name of the function would not
-matter, neither would the module it is imported from or the version of
-the module or the quality of the code.
+If the type of a function was a predicate as detailed as described
+above, such a predicate could be used as query. The name of the
+function would not matter, neither would the module it is imported
+from or the version of the module or the quality of the code.
 
 An import statement might look like this:
 
@@ -134,3 +133,8 @@ languages and projects:
 * Ciao (http://ciao-lang.org/)
 * Idris (http://www.idris-lang.org/)
 * Erlang (http://www.erlang.org/)
+* GCLA (https://sicstus.sics.se/sicstus/docs/3.7.1/html/sicstus_36.html)
+* Dafny (http://research.microsoft.com/en-us/projects/dafny/)
+* SAW (http://saw.galois.com/)
+* Infer (http://fbinfer.com/)
+

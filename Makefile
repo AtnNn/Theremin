@@ -1,16 +1,9 @@
-LANGUAGE := NoImplicitPrelude RankNTypes
+CC ?= clang
+CCFLAGS ?= -Wall -g -std=gnu99
+LDFLAGS ?=
 
-GHCFLAGS += $(patsubst %, -X%, $(LANGUAGE))
-GHCFLAGS += -hidir build -odir build
-
-SOURCES = Theremin.hs $(shell find Theremin | egrep '\.(hs|hs-boot)')
-
-theremin: $(SOURCES) | build
-	ghc -o $@ --make Theremin.hs -main-is Theremin $(GHCFLAGS)
-	@test -e $@ && touch $@
-
-build:
-	mkdir build
+poorlog: boot/poorlog.c
+	$(CC) $(CCFLAGS) $(LDFLAGS) -o $@ $^
 
 clean:
-	rm -rf build theremin
+	rm -rf poorlog 
