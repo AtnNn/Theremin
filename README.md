@@ -1,43 +1,61 @@
 # Theremin
 
-Theremin is programming language and a static analysis tool built to
-experiment with:
+Theremin is a research project for experimenting with:
 
-* Predicates as types
-* Code search, versioning
+* Generalised types
+* Code search and versioning
 * Polyglot programming
+* Implicits in code
+* Incremental programming
+* 80x25 programming
 
 Theremin is in a very early stage of development. The code in this
 repository currently only contains an evaluator for a prolog-like
 language.
 
-Join the discussion on irc.freenode.net #theremin
+If you are interested in these ideas, join me on irc.freenode.net #theremin
 
 Find the code at http://github.com/atnnn/theremin
 
-## Predicates as types
+> There are only two hard things for the human mind: re-evaluating
+  beliefs, putting thoughts into words and knowing when to stop.
 
-In Haskell, the type of a `sort` function might be `Ord a => [a] ->
-[a]`. Ideally, a programmer should be able to tell the compiler that
-the type of `sort` is `sorted a (sort a)`, where `sorted` could
-be defined as `sorted a b = bag b == a && ordered b`. The compiler
-could even be told that `time_complexity (sort n) = O(n * log n)`.
+## Generalised types
 
-This has already been done in languages such as Agda [1]. Proving
-things in Agda has disadvantages: It requires modifying the program
-things are being proven about by using types as proofs. Proofs easily
-break if they do not follow exactly the structure of the program. With
-Theremin, different types of notations for expressing proofs will be
-explored to make proofs shorter and more natural to write.
+Most programming languages have a very restricted concept of types.
+In general, I expect the type of a function or variable to fully
+describe its public interface, while the body or value would be a
+private implementation or instance of the type.
 
-[1] https://gist.github.com/twanvl/5635740
+However, In most languages, the types correspond only to the
+information needed by the compiler or interpreter to generate target
+code or select the correct branch at runtime. In some languages types
+can also help programmers avoid certain classes of bugs.
 
-Theremin aims at solving some of these problems by removing types
-entirely and using more general predicates to reason about
-programs. Theremin will use static analysis to build a knowledge base.
-The knowledge base will also contain code annotations and static
-asserts. Different third-party solvers will be used to check the
-consistency of the knowledge base.
+A variable or function, in the context or a larger body of code, will
+have the following characteristics. All of these, at some level, could
+make up its type:
+
+* Representation or ABI
+* Value or implementation
+* Documentation
+* Other constraints such as tests, assertions, pre-conditions,
+  post-conditions and invariants
+
+Most of these characteristics only serve as hints to developers or as
+separate or run-time checks. These hints could be checked by machine
+to reduce cognitive load. These checks could be performed earlier to
+improve correctness and performance.
+
+The syntactic difference between terms and types in most languages
+increases the dichtomy between constraints that are checked and those
+that aren't. This situation could be improved by using the same
+language for terms and types.
+
+There are already a wealth of tools that can check and work with these
+generalised types, such as assisted theorem provers and novel
+programming languages. These could be made easier to use with
+mainstream programming languages.
 
 ## Code search and versioning
 
@@ -51,10 +69,10 @@ An import statement might look like this:
 
 `import sort : sorted a (sort a) && time_complexity (sort a) < O(n * log(n))`
 
-This raises many concerns that Theremin will attempt to resolve. Too
+This raises concerns that could be addressed in different ways. Too
 much abstraction makes debugging and reasoning about code very
 difficult. The time complexity of a function is a very limited
-restriction. The function may not be performant, it may have unwanted
+restriction, the function may not be performant, it may have unwanted
 side effects or it may use a lot of memory. A compiler would need an
 indexed knowledge base to efficiently find the requested function. If
 the knowledge base spanned multiple code bases there would be issues
@@ -62,15 +80,40 @@ with trust and transitive imports.
 
 ## Polyglot Programming
 
-Interoperability with other languages is one of the main concerns of
-Theremin. Although it is currently only a playground for ideas, the
-goal of Theremin is to be useful for everyday programmers. It must
-therefore work with mainstream languages.
+TODO
+
+* Interoperability between languages
+* Support for mainstream languages
+* Storing program annotations and proofs separately
+* Using static checking tools and anotations while staying compatible with other tools and languages
+* Sharing knowledge between various tools
+* Antiquotes in DSL
+
+## Implicits in code
+
+TODO
+
+* Controlling abstraction level and implicit operations, such as overload resolution, memory allocation and implicit conversion.
+
+## Incremental programming
+
+TODO
+
+* Reasoning about code at different abstraction levels
+* Knowledge base for guided programming and managing TODOs
+* Proving that the documentation is correct
+* Or that the code correctly implements the documentation
+* Self-documenting code
+* Keeping clear and concise implementations next to more performant versions that may have more coupling and use unsafe and lower-level constructs
+
+## 80x25 programming
+
+TODO
+
+* reasoning about software in short, independant parts
+* 80x25 is just an arbitrary guideline and makes for a catchy name
 
 ## Authors
-
-I am currently the sole author of Theremin. I use to experiment the ideas
-expressed above. Please help by contributing code, ideas or criticism.
 
 My name is Etienne Laurin. I write code for a living. I have
 contributed to large projects in over a dozen languages from C++ to
@@ -78,14 +121,10 @@ Haskell, Prolog and JavaScript. I have used many dozens of other
 different languages. I have tried improving some of these languages: I
 built a tool to identify and remove duplicate code from large Scheme
 codebases and I wrote the first implementation of deferred type errors
-for GHC.
-
-## Name
-
-The name Theremin was suggested by my co-workers Michael during a
-brainstorming session. It was chosen because it is a well known word
-that is easy to pronounce in English and because it lets me use the
-extension `the` for Theremin source files.
+for GHC. I have ported complicated software between various platforms
+and wrote and maintained large build systems. I believe programming
+can be improved and that we already have most of the tools available
+to do so.
 
 ## Inspiration
 

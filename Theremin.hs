@@ -1,5 +1,5 @@
 
-module Theremin where
+module Main where
 
 import Theremin.Prelude
 import Theremin.AST
