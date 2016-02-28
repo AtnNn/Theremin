@@ -137,4 +137,5 @@ languages and projects:
 * Dafny (http://research.microsoft.com/en-us/projects/dafny/)
 * SAW (http://saw.galois.com/)
 * Infer (http://fbinfer.com/)
+* Seahorn (https://github.com/seahorn/seahorn)
 
