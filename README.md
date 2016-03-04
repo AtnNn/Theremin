@@ -7,11 +7,15 @@ Theremin is a research project for experimenting with:
 * Polyglot programming
 * Implicits in code
 * Incremental programming
-* 80x25 programming
+* Free as in monad
+* Programming environment
 
-Theremin is in a very early stage of development. The code in this
-repository currently only contains an interpreter for a prolog-like
-language.
+I am exploring these loosely related ideas in an attempt to make
+software development faster, easier and more fun. Despite the fact
+that this document reads like a manifesto or a list of eccentric
+ideas, my goal is to end up with pragmatic tools that I can use every
+day. This repository already contains some code that has been useful
+to me.
 
 If you are interested in these ideas, join me on irc.freenode.net #theremin
 
@@ -53,20 +57,20 @@ that aren't. This situation could be improved by using the same
 language for terms and types.
 
 There are already a wealth of tools that can check and work with these
-generalised types, such as assisted theorem provers and novel
-programming languages. These could be made easier to use with
-mainstream programming languages.
+generalised types, such as assisted theorem provers, constraint
+solvers and novel programming languages. These could be made easier to
+use with mainstream programming languages.
 
 ## Code search and versioning
 
-If the type of a function was a predicate as detailed as described
-above, such a predicate could be used as query. The name of the
-function would not matter, neither would the module it is imported
-from or the version of the module or the quality of the code.
+If the type of a function was as detailed as described above, such a
+type could be used as query. The name of the function would not
+matter, neither would the module it is imported from or the version of
+the module or the quality of the code.
 
 An import statement might look like this:
 
-`import sort : sorted a (sort a) && time_complexity (sort a) < O(n * log(n))`
+`import sort : sorted (sort a) && bag(a) = bag(sorted(a)) && time_complexity (sort a) < O(len(a) * log(len(a)))`
 
 This raises concerns that could be addressed in different ways. Too
 much abstraction makes debugging and reasoning about code very
@@ -77,58 +81,141 @@ indexed knowledge base to efficiently find the requested function. If
 the knowledge base spanned multiple code bases there would be issues
 with trust and transitive imports.
 
-## Polyglot Programming
+## Polyglot programming
 
-TODO
+Almost all programming languages have a vast amount of concepts and
+properties in common, but the little details in semantics and
+implementation make them very incompatible. This incompatibility can
+be bridged, see for example the vast amount of compilers targetting
+JavaScript. This could be done in a more general way.
 
-* Interoperability between languages
-* Support for mainstream languages
-* Storing program annotations and proofs separately
-* Using static checking tools and anotations while staying compatible with other tools and languages
-* Sharing knowledge between various tools
-* Antiquotes in DSL
+Porting code to a different language could be a lot easier. Using
+libraries written in a different language could be a lot easier. It
+could be possible to mix different languages in the same source file,
+using quotes and antiquotes and/or a custom pre-processor.
+
+Many beneficial tools and features developped for academic languages
+could be ported to work in mainstream languages. There needs to be
+better frameworks and better tools available to encourage the
+unobstrusive and incremental adoption of better tools and features in
+mainstream languages, as well as a common ground for these tools and
+features to interoperate harmoniously and share analyses.
 
 ## Implicits in code
 
-TODO
+The following are examples of operations that can, to various degrees,
+be surrendered to the programmer or claimed by a system, language or
+library:
 
-* Controlling abstraction level and implicit operations, such as overload resolution, memory allocation and implicit conversion.
+* Memory allocation
+* Scheduling
+* Concurrency
+* Overload resolution
+* Type inference
+* Type conversion
+* Type representation
+* Optimisations
+* Default initialisation
+* Import resolution
+
+Programmers could be allowed more control over these operations, to
+make them entirely explicit or to allow better fine tuning and
+customisation or to hide them entirely. Either way, compilers,
+interpreters and debuggers could be fitted with much better better
+flags, pragmas and API for exposing and examining implicit operations.
+
+The choices that are made for these implicit operations are often
+ambiguous and highly dependant on the environment. In addition to
+being exposed, these choices could also be stored (inline or in a
+separate file). In future runs, this data could be used as a guide for
+new choices and as a source of warnings when the choices change (such
+as a diferent version or type of an import, or a missing
+optimisation).
+
+Code that expresses things like instructions, operations and
+representations would often be better if the compiler did not hide any
+implicit choices about those operations and representations. But when
+code expresses higher-level ideas or data, it is often better for the
+compiler to hide low-level details and for the programmer not to hide
+implicit constraints.
 
 ## Incremental programming
 
-TODO
+Source code is rarely ever complete. Most code bases come with a large
+amount of TODOs, issues, missing documentation, missing code,
+unoptimised code, experimental features, debug flags, misunderstood
+hacks, version control and many other indications of a work in
+progress.
 
-* Reasoning about code at different abstraction levels
-* Knowledge base for guided programming and managing TODOs
-* Proving that the documentation is correct
-* Or that the code correctly implements the documentation
-* Self-documenting code
-* Keeping clear and concise implementations next to more performant versions that may have more coupling and use unsafe and lower-level constructs
+Version control could allow tracking issues, features and fixes
+directly in addition to plain branches. Diffs could be improved by
+making them aware of syntax, refactoring patterns and of the
+multi-file nature of changes. They could also be allowed to commute.
 
-## 80x25 programming
+Code made ugly by optimisations could live next to a clean readable
+implementation, and a proof of the equivalence could be available.
 
-TODO
+The same could be true for issues and documentation, they could be an
+integral part of the code. Documentation for a feature could be linked
+to the code that implements the feature. Issues and fixes could be
+linked together through version control.
 
-* reasoning about software in short, independant parts
-* 80x25 is just an arbitrary guideline and makes for a catchy name
+Language or preprocessors could provide better syntactical,
+zero-overhead abstractions to encourage writing self-documenting code.
 
-## Authors
+Tools and editors could better encourage reasoning about software in
+short, independant parts. I call this 80x25 programming.
+
+## Free as in monad
+
+Better tools could be produced for free.
+
+Free FFI bindings can be generated from a header file. Free
+documentation can be generated from tests and well-documented code.
+
+If I take this idea further, a free compiler could even be generated
+from any interpreter, or a free interpreter from a compiler.
+
+## Programming environment
+
+The requirements and expectations for one-off scripts, debugging code,
+exploratory programming and interactive programming are very different
+from the requirements of code that has to be re-used, maintained or
+shared. But in practice, all these types of code have to mix.
+
+It should be easy to write and test code interactively, and then easy
+to re-format, verify, document and save it for re-use. Conversly, it
+should be easy to add temporary sections of code that can access
+private fields, that don't trigger any warnings and that have access
+to the current state of the program.
+
+It should be possible to examine all static constructs
+dynamically. Static and dynamic environments could be available in a
+platform-independent way. Source code could be read as if in a
+homoiconic language. Algorithms used by the compiler could all be
+exposed as a library, such as template instantiation, type inference
+and linking.
+
+All this could be done with awareness of the whole codebase, such as
+generated code, or cumulative flags taken from the default compiler
+flags, the environment and custom makefiles.
+
+## Author
 
 My name is Etienne Laurin. I write code for a living. I have
 contributed to large projects in over a dozen languages from C++ to
 Haskell, Prolog and JavaScript. I have used many dozens of other
-different languages. I have tried improving some of these languages: I
-built a tool to identify and remove duplicate code from large Scheme
-codebases and I wrote the first implementation of deferred type errors
-for GHC. I have ported complicated software between various platforms
-and wrote and maintained large build systems. I believe programming
-can be improved and that we already have most of the tools available
-to do so.
+different languages. I have tried improving some of these languages:
+on college I built a tool to identify and remove duplicate code from
+large Scheme codebases and later I wrote the first implementation of
+deferred type errors for GHC. I have ported complicated software
+between various platforms and wrote and maintained large build
+systems. I believe programming can be improved and that we already
+have most of the tools available to do so.
 
 ## Inspiration
 
-Some of the ideas that make up Theremin are inspired by these
-languages and projects:
+Some of these ideas are inspired by these languages and projects:
 
 * Ciao (http://ciao-lang.org/)
 * Idris (http://www.idris-lang.org/)
@@ -138,4 +225,4 @@ languages and projects:
 * SAW (http://saw.galois.com/)
 * Infer (http://fbinfer.com/)
 * Seahorn (https://github.com/seahorn/seahorn)
-
+* Parrot Compiler Tools (http://trac.parrot.org/parrot/wiki/Languages)
