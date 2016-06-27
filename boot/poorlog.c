@@ -100,7 +100,7 @@ bool prelude_loaded = false;
 
 atom_t atom_slash, atom_colon, atom_nil, atom_cons, atom_op, atom_entails,
     atom_frame, atom_drop, atom_comma, atom_eq, atom_empty, atom_true,
-    atom_underscore, atom_assertz_dcg, atom_rarrow;
+    atom_underscore, atom_assertz_dcg, atom_rarrow, atom_is, atom_add;
 
 bool debug_eval = false;
 bool debug_hashtable = false;
@@ -1013,6 +1013,26 @@ bool unify(Term* a, Term* b){
     UNREACHABLE;
 }
 
+integer_t eval_math(Term* expr){
+    expr = chase(expr);
+    D_EVAL{ trace_term("eval_math", expr); }
+    switch(expr->type){
+    case INTEGER:
+        return expr->data.integer;
+    case FUNCTOR: {
+        atom_t atom = expr->data.functor.atom;
+        functor_size_t size = expr->data.functor.size;
+        Term** args = expr->data.functor.args;
+        if(atom == atom_add && size == 2){
+            return eval_math(args[0]) + eval_math(args[1]);
+        }
+    }
+    default:
+        fatal_error("invalid math expression");
+        UNREACHABLE;
+    }
+}
+
 bool prim_unify(Term** args){
     return unify(args[0], args[1]);
 }
@@ -1032,6 +1052,15 @@ bool prim_cut(Term** args){
 
 bool prim_assertz(Term** args){
     return assertz(args[0]);
+}
+
+bool prim_is(Term** args) {
+    Term* lhs = chase(args[0]);
+    Term* rhs = chase(args[1]);
+    disable_gc();
+    bool ret = unify(lhs, Integer(eval_math(rhs)));
+    enable_gc();
+    return ret;
 }
 
 bool prim_univ(Term** args){
@@ -1091,6 +1120,7 @@ prim_t find_prim(atom_t atom, functor_size_t size){
     PRIM(!, 0, cut);
     PRIM(assertz, 1, assertz);
     PRIM(=.., 2, univ);
+    PRIM(is, 2, is);
 #undef PRIM
 
     return NULL;
@@ -1655,6 +1685,8 @@ void load_prelude(){
     ADD_OP(1000, "xfy", ",");
     ADD_OP(700, "xfx", "=");
     ADD_OP(700, "xfx", "=..");
+    ADD_OP(500, "yfx", "+");
+    ADD_OP(700, "xfx", "is");
 #undef ADD_OP
 
     enable_gc();
@@ -1839,6 +1871,8 @@ int main(int argc, char** argv){
     atom_underscore = intern("_");
     atom_rarrow = intern("-->");
     atom_assertz_dcg = intern("assertz_dcg");
+    atom_is = intern("is");
+    atom_add = intern("+");
 
     stack = Atom(atom_empty);
 

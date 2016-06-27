@@ -4,6 +4,10 @@ _ ; B :- B.
 append([], Xs, Xs).
 append([X|Xs], Ys, [X|Zs]) :- append(Xs, Ys, Zs).
 
+between(A, A, A) :- ! .
+between(A, B, A).
+between(A, B, C) :- (AA is (A + 1)), between(AA, B, C).
+
 assertz_dcg(A --> B) :-
     convert_dcg_head(A, Ap, L, R),
     convert_dcg_body(B, Bp, L, R),
