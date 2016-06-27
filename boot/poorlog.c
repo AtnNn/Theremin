@@ -459,7 +459,7 @@ hash_t hash(Term* term){
 }
 
 atom_t intern(char* string){
-    enable_gc();
+    disable_gc();
     Term* str = String(string);
     Term** term = HashTable_get(interned, str);
     if(*term){
@@ -469,7 +469,7 @@ atom_t intern(char* string){
         D_ATOM{
             fprintf(stderr, "already interned %s as %lu\n", string, (*term)->data.functor.atom);
         }
-        disable_gc();
+        enable_gc();
         return (*term)->data.functor.atom;
     }
     atom_t atom = next_free_atom++;
@@ -479,12 +479,12 @@ atom_t intern(char* string){
     D_ATOM{
         fprintf(stderr, "interning %s as %lu\n", string, atom);
     }
-    disable_gc();
+    enable_gc();
     return atom;
 }
 
 void intern_prim(char* string, atom_t atom){
-    enable_gc();
+    disable_gc();
     Term* str = String(string);
     Term** term = HashTable_get(interned, str);
     if(*term){
@@ -496,7 +496,7 @@ void intern_prim(char* string, atom_t atom){
     D_ATOM{
         fprintf(stderr, "interning primitve %s as %lu\n", string, atom);
     }
-    disable_gc();
+    enable_gc();
 }
 
 Term* Spec(atom_t atom, int size){
