@@ -111,6 +111,10 @@ bool* debug_enabled = &prelude_loaded;
 bool always = true;
 bool evaluating = false;
 
+char *strdup(const char *s){
+    return strcpy(malloc(strlen(s)), s);
+}
+
 Buffer* Buffer_new(size_t size){
     Buffer* buffer = malloc(sizeof(Buffer));
     buffer->size = size;
@@ -135,7 +139,7 @@ void Buffer_resize(Buffer* buffer, size_t size){
 HashTable* HashTable_new(size_t size){
     HashTable* table = malloc(sizeof(HashTable) + sizeof(Term*) * (size - 1));
     D_HASHTABLE{
-        fprintf(stderr, "new hashtable %p of size %zu\n", table, size);
+        fprintf(stderr, "new hashtable %p of size %zu\n", (void*)table, size);
     }
     table->size = size;
     memset(table->table, 0, sizeof(Term*) * size);
@@ -144,7 +148,7 @@ HashTable* HashTable_new(size_t size){
 
 void HashTable_free(HashTable* table){
     D_HASHTABLE{
-        fprintf(stderr, "freeing hashtable %p\n", table);
+        fprintf(stderr, "freeing hashtable %p\n", (void*)table);
     }
     free(table);
 }
@@ -734,7 +738,7 @@ Term** HashTable_get(HashTable* table, Term* key){
     hash_t hkey = hash(key);
     Term** assoc = &table->table[hkey % table->size];
     D_HASHTABLE{
-        fprintf(stderr, "hashtable %p get:\n", table);
+        fprintf(stderr, "hashtable %p get:\n", (void*)table);
         trace_term("key (hash %u)", key, hkey);
         trace_term("assoc", *assoc);
     }
@@ -756,7 +760,7 @@ void HashTable_append(HashTable* table, Term* key, Term* val){
     (*list) = Functor2(atom_cons, val, *list ? *list : Atom(atom_nil));
     enable_gc();
     D_HASHTABLE{
-        fprintf(stderr, "hashtable %p: append\n", table);
+        fprintf(stderr, "hashtable %p: append\n", (void*)table);
         trace_term("key", key);
         trace_term("val", val);
     }
@@ -1792,6 +1796,7 @@ int main(int argc, char** argv){
             break;
         case 'h':
             printf("%s\n", usage);
+            exit(0);
             break;
         case 'd': 
             if(!strcmp(arg+2, "parse")) debug_parse = true; else

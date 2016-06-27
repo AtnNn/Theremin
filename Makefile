@@ -1,5 +1,5 @@
 CC ?= clang
-CCFLAGS ?= -Wall -g -std=gnu99
+CCFLAGS ?= -Wall -Werror -g -std=c99 -pedantic-errors
 LDFLAGS ?=
 
 poorlog: boot/poorlog.c
