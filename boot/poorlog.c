@@ -7,7 +7,11 @@
 #include <stdarg.h>
 #include <ctype.h>
 #include <errno.h>
+
 #include <unistd.h>
+#include <sys/types.h>
+#include <signal.h>
+int kill(pid_t, int);
 
 #define PRELUDE_PATH "boot/stdlib/prelude.pl"
 
@@ -19,6 +23,7 @@
 #define OPS_HASHTABLE_SIZE 1024
 #define DEFAULT_BUFFER_SIZE 1024
 #define MAX_NO_PAREN_TERMS 1024
+#define MAX_STREAMS 256
 
 #define HASH_INIT 2166136261
 #define HASH_PRIME 16777619
@@ -35,13 +40,18 @@ typedef uint32_t hash_t;
 typedef uint8_t functor_size_t;
 typedef int64_t integer_t;
 typedef uint64_t atom_t;
-typedef void (*renderer_t)(void*, char*);
+typedef void (*renderer_t)(void*, char*, size_t);
+
+typedef struct {
+    char* ptr;
+    size_t size;
+} string_t;
 
 typedef struct Term {
     enum { FUNCTOR, VAR, MOVED, INTEGER, STRING } type;
     union {
         integer_t integer;
-        char* string;
+        string_t string;
         struct Term* moved_to;
         struct {
             atom_t atom;
@@ -75,6 +85,14 @@ typedef struct {
     Term* table[1];
 } HashTable;
 
+typedef struct {
+    int fd;
+    char* buf;
+    size_t pos;
+    size_t size;
+    size_t alloc_size;
+} Stream;
+
 #define MIN(a,b) ((a) < (b) ? a : b)
 #define MAX(a,b) ((a) < (b) ? b : a)
 
@@ -97,10 +115,20 @@ Term* keep = NULL;
 int gc_disable_count = 0;
 bool would_gc = false;
 bool prelude_loaded = false;
+Stream streams[MAX_STREAMS];
+int free_stream = 0;
 
 atom_t atom_slash, atom_colon, atom_nil, atom_cons, atom_op, atom_entails,
     atom_frame, atom_drop, atom_comma, atom_eq, atom_empty, atom_true,
-    atom_underscore, atom_assertz_dcg, atom_rarrow, atom_is, atom_add;
+    atom_underscore, atom_assertz_dcg, atom_rarrow;
+
+atom_t atom_is, atom_add;
+
+atom_t atom_process_create, atom_kill_process,
+    atom_close, atom_read, atom_write,
+    atom_read_string, atom_write_string,
+    atom_string_codes, atom_atom_string,
+    atom_eof;
 
 bool debug_eval = false;
 bool debug_hashtable = false;
@@ -111,8 +139,64 @@ bool* debug_enabled = &prelude_loaded;
 bool always = true;
 bool evaluating = false;
 
-char *strdup(const char *s){
-    return strcpy(malloc(strlen(s)), s);
+void fatal_error(char* format, ...){
+    va_list argptr;
+    va_start(argptr, format);
+    fprintf(stderr, "fatal error: ");
+    vfprintf(stderr, format, argptr);
+    fprintf(stderr, "\n");
+    va_end(argptr);
+    exit(1);
+    UNREACHABLE;
+}
+
+void Streams_init(){
+    free_stream = 0;
+    for(int n = 0; n < MAX_STREAMS; n++){
+        streams[n].fd = n + 1;
+        streams[n].pos = 1;
+        streams[n].alloc_size = 0;
+    }
+}
+
+void Streams_close_all(){
+    while(free_stream < MAX_STREAMS){
+        Stream* stream = &streams[free_stream];
+        free_stream = stream->fd;
+        stream->fd = -1;
+    }
+    for(int n = 0; n < MAX_STREAMS; n++){
+        if(streams[n].fd > 2){
+            close(streams[n].fd);
+        }
+    }
+}
+
+int Stream_new(int fd){
+    if(free_stream >= MAX_STREAMS){
+        fatal_error("too many open streams"); 
+    }
+    int ret = free_stream;
+    Stream* s = &streams[ret];
+    free_stream = s->fd;
+    s->fd = fd;
+    s->buf = NULL;
+    s->pos = 0;
+    s->size = 0;
+    s->alloc_size = 0;
+    return ret;
+}
+
+void Stream_close(int n){
+    if(n >= MAX_STREAMS || streams[n].pos > streams[n].alloc_size) {
+        fatal_error("invalid stream");
+    }
+    close(streams[n].fd);
+    streams[n].fd = free_stream;
+    free_stream = n;
+    free(streams[n].buf);
+    streams[n].pos = 1;
+    streams[n].alloc_size = 0;
 }
 
 Buffer* Buffer_new(size_t size){
@@ -163,17 +247,6 @@ bool error(char* format, ...){
     return false;
 }
 
-void fatal_error(char* format, ...){
-    va_list argptr;
-    va_start(argptr, format);
-    fprintf(stderr, "fatal error: ");
-    vfprintf(stderr, format, argptr);
-    fprintf(stderr, "\n");
-    va_end(argptr);
-    exit(1);
-    UNREACHABLE;
-}
-
 Pool* Pool_new(){
     Pool* pool = malloc(sizeof(Pool));
     pool->sections = 1;
@@ -201,7 +274,7 @@ void Term_destroy(Term* term){
     case INTEGER:
         break;
     case STRING:
-        free(term->data.string);
+        free(term->data.string.ptr);
         break;
     }
 }
@@ -321,10 +394,47 @@ Term* Integer(integer_t n){
     return term;
 }
 
-Term* String(char* string){
+string_t mkstring_nt(char* str){
+    string_t ret;
+    ret.size = strlen(str);
+    ret.ptr = memcpy(malloc(ret.size + 1), str, ret.size + 1);
+    return ret;
+}
+
+string_t mkstring(char* str, size_t size){
+    string_t ret;
+    ret.size = size;
+    ret.ptr = memcpy(malloc(size + 1), str, size + 1);
+    ret.ptr[size] = 0;
+    return ret;
+}
+
+int stringcmp(string_t a, string_t b){
+    if(a.size < b.size){
+        return -(int)(b.size - a.size);
+    }else if(a.size > b.size){
+        return a.size - b.size;
+    }else{
+        for(int i = 0; i < a.size; i++){
+            if(a.ptr[i] != b.ptr[i]){
+                return (int)a.ptr[i] - b.ptr[i];
+            }
+        }
+    }
+    return 0;
+}
+
+Term* String(char* ptr, size_t size){
     Term* term = Pool_add_term_gc(pool);
     term->type = STRING;
-    term->data.string = strdup(string);
+    term->data.string = mkstring(ptr, size);
+    return term;
+}
+
+Term* String_nt(char* str){
+    Term* term = Pool_add_term_gc(pool);
+    term->type = STRING;
+    term->data.string = mkstring_nt(str);
     return term;
 }
 
@@ -410,9 +520,9 @@ hash_t hash_byte(uint8_t c, hash_t hash){
     return (hash ^ c) * HASH_PRIME;
 }
 
-hash_t hash_string(char* str, hash_t hash){
-    for(; *str; str++){
-        hash = hash_byte(*str, hash);
+hash_t hash_string(string_t str, hash_t hash){
+    for(size_t i = 0; i < str.size; i++){
+        hash = hash_byte(str.ptr[i], hash);
     }
     return hash;
 }
@@ -464,7 +574,7 @@ hash_t hash(Term* term){
 
 atom_t intern(char* string){
     disable_gc();
-    Term* str = String(string);
+    Term* str = String_nt(string);
     Term** term = HashTable_get(interned, str);
     if(*term){
         if((*term)->type != FUNCTOR){
@@ -489,7 +599,7 @@ atom_t intern(char* string){
 
 void intern_prim(char* string, atom_t atom){
     disable_gc();
-    Term* str = String(string);
+    Term* str = String_nt(string);
     Term** term = HashTable_get(interned, str);
     if(*term){
         fatal_error("prim '%s' already exists", string);
@@ -525,20 +635,20 @@ Term* chase(Term* term){
     return term;
 }
 
-char* atom_string(atom_t atom){
+string_t atom_string(atom_t atom){
     static char buf[32];
     Term* term = HashTable_find(atom_names, Atom(atom));
     if(!term){
-        snprintf(buf, sizeof(buf), "#atom%lu", atom);
-        return buf;
+        int n = snprintf(buf, sizeof(buf), "#atom%lu", atom);
+        return mkstring(buf, n);
     }
     if(term->type != STRING) fatal_error("atom names table contains non-string");
     return term->data.string;
 }
 
-void Term_render(Term* term, bool show_vars, void(*write)(void*, char*), void* data){
+void Term_render(Term* term, bool show_vars, renderer_t write, void* data){
     if(!term){
-        write(data, "NULL");
+        write(data, "NULL", 4);
         return;
     }
     if(!show_vars){
@@ -546,40 +656,42 @@ void Term_render(Term* term, bool show_vars, void(*write)(void*, char*), void* d
     }
     switch(term->type){
     case MOVED:
-        write(data, "_MOVED");
+        write(data, "_MOVED", 6);
         break;
     case VAR:
         if(term->data.var.ref != term){
-            write(data, "%");
+            write(data, "%", 1);
             Term_render(term->data.var.ref, show_vars, write, data);
         }else{
-            write(data, atom_string(term->data.var.name));
+            string_t name = atom_string(term->data.var.name);
+            write(data, name.ptr, name.size);
         }
         break;
     case INTEGER: {
         char buf[16];
-        sprintf(buf, "%ld", term->data.integer);
-        write(data, buf);
+        int n = sprintf(buf, "%ld", term->data.integer);
+        write(data, buf, n);
         break;
     }
     case STRING:
-        write(data, "\"");
-        write(data, term->data.string);
-        write(data, "\"");
+        write(data, "\"", 1);
+        write(data, term->data.string.ptr, term->data.string.size);
+        write(data, "\"", 1);
         break;
-    case FUNCTOR:
-        write(data, atom_string(term->data.functor.atom));
+    case FUNCTOR: {
+        string_t name = atom_string(term->data.functor.atom);
+        write(data, name.ptr, name.size);
         if(term->data.functor.size){
-            write(data, "(");
+            write(data, "(", 1);
             for(int i = 0; i < term->data.functor.size; i++){
                 Term_render(term->data.functor.args[i], show_vars, write, data);
                 if(i + 1 < term->data.functor.size){
-                    write(data, ", ");
+                    write(data, ", ", 2);
                 }
             }
-            write(data, ")");
+            write(data, ")", 1);
         }
-        break;
+    } break;
     }
 }
 
@@ -680,7 +792,7 @@ bool Term_exact_eq(Term* a, Term* b){
     case INTEGER:
         return a->data.integer == b->data.integer;
     case STRING:
-        return !strcmp(a->data.string, b->data.string);
+        return !stringcmp(a->data.string, b->data.string);
     case FUNCTOR:
         if(a->data.functor.atom != b->data.functor.atom){
             return false;
@@ -774,8 +886,8 @@ Term* HashTable_find(HashTable* table, Term* key){
     return Assoc_find(assoc, key);
 }
 
-void render_fprintf(FILE* out, char* str){
-    fprintf(out, "%s", str);
+void render_fprintf(FILE* out, char* str, size_t size){
+    fprintf(out, "%.*s", (int)size, str);
 }
 
 void Term_print(Term* term){
@@ -991,7 +1103,7 @@ bool unify(Term* a, Term* b){
     case INTEGER:
         return a->data.integer == b->data.integer;
     case STRING:
-        return !strcmp(a->data.string, b->data.string);
+        return !stringcmp(a->data.string, b->data.string);
     case FUNCTOR:
         if(a->data.functor.atom != b->data.functor.atom){
             return false;
@@ -1104,6 +1216,113 @@ bool prim_univ(Term** args){
     }
 }
 
+bool process_create(char* path, char** args, int* in, int* out, int* err, int* pid_out){
+    int pipes[6];
+    pipe(&pipes[0]);
+    pipe(&pipes[2]);
+    pipe(&pipes[4]);
+    int pid = fork();
+    if(pid < 0){
+        fatal_error("fork failed");
+        UNREACHABLE;
+    }else if(pid == 0){
+        dup2(pipes[0], 0);
+        close(pipes[1]);
+        close(pipes[2]);
+        dup2(pipes[3], 1);
+        close(pipes[4]);
+        dup2(pipes[5], 2);
+        Streams_close_all();
+        execv(path, args);
+        exit(-1);
+        UNREACHABLE;
+    }else{
+        close(pipes[0]);
+        *in = Stream_new(pipes[1]);
+        *out = Stream_new(pipes[2]);
+        close(pipes[3]);
+        *err = Stream_new(pipes[4]);
+        close(pipes[5]);
+        *pid_out = pid;
+        return true;
+    }
+}
+
+string_t Term_string(Term* term){
+    if(term->type != STRING){
+        fatal_error("expected string");
+    }
+    return term->data.string;
+}
+
+integer_t Term_integer(Term* term){
+    if(term->type != INTEGER){
+        fatal_error("expected integer");
+    }
+    return term->data.integer;    
+}
+
+bool prim_process_create(Term** args){
+    disable_gc();
+    char* command_path = Term_string(args[0]).ptr;
+    char* command_args[256];
+    int n = 0;
+    for(Term* list = args[1]; !Atom_eq(list, atom_nil); list = List_tail(list)){
+        if(n >= sizeof(command_args) - 1){
+            fatal_error("too many arguments for process");
+        }
+        command_args[n] = Term_string(List_head(list)).ptr;
+        n++;
+    }
+    command_args[n] = NULL;
+    int input_stream, output_stream, error_stream, pid;
+    bool ret =
+        process_create(command_path, command_args, &input_stream, &output_stream, &error_stream, &pid) &&
+        unify(args[2], Integer(input_stream)) &&
+        unify(args[3], Integer(output_stream)) &&
+        unify(args[4], Integer(error_stream)) &&
+        unify(args[5], Integer(pid));
+    enable_gc();
+    return ret;
+}
+
+bool prim_kill_process(Term** args){
+    Term* pid = chase(args[0]);
+    if(pid->type != INTEGER){
+        fatal_error("kill_process expects an integer");
+    }
+    kill(pid->data.integer, SIGTERM);
+    return true;
+}
+
+bool prim_close(Term** args){
+    Term* stream = chase(args[0]);
+    if(stream->type != INTEGER){
+        fatal_error("close expects an integer");
+    }
+    Stream_close(stream->data.integer);
+    return true;
+}
+
+bool prim_write_string(Term** args){
+    int stream = Term_integer(args[0]);
+    string_t str = Term_string(args[1]);
+    write(streams[stream].fd, str.ptr, str.size);
+    return true;
+}
+
+bool prim_read_string(Term** args){
+    integer_t stream = Term_integer(args[0]);
+    integer_t max = Term_integer(args[1]);
+    char buf[max];
+    ssize_t res = read(streams[stream].fd, buf, max);
+    if(res == 0){
+        return unify(args[2], Atom(atom_eof));
+    }else{
+        return unify(args[2], String(buf, res));
+    }
+}
+
 prim_t find_prim(atom_t atom, functor_size_t size){
 
 #define PRIM(f, n, r) \
@@ -1121,6 +1340,15 @@ prim_t find_prim(atom_t atom, functor_size_t size){
     PRIM(assertz, 1, assertz);
     PRIM(=.., 2, univ);
     PRIM(is, 2, is);
+    PRIM(process_create, 6, process_create);
+    PRIM(kill_process, 1, kill_process);
+    PRIM(close, 1, close);
+    //PRIM(write, 2, write);
+    //PRIM(read, 2, read);
+    PRIM(write_string, 2, write_string);
+    PRIM(read_string, 3, read_string);
+    //PRIM(string_codes, 2, string_codes);
+    //PRIM(atom_string, 2, atom_string);
 #undef PRIM
 
     return NULL;
@@ -1286,7 +1514,7 @@ Term* parse_atomic(char** str, HashTable* vars){
             if(!strcmp(buf, "_")){
                 term = Var(atom_underscore);
             }else{
-                Term** var_term = HashTable_get(vars, String(buf));
+                Term** var_term = HashTable_get(vars, String_nt(buf));
                 if(!*var_term){
                     *var_term = Var(intern(buf));
                 }
@@ -1392,8 +1620,8 @@ Term* parse_simple_term(char** str, HashTable* vars){
 }
 
 void op_type(integer_t prec, atom_t atom, integer_t *left, integer_t *right){
-    char* spec = atom_string(atom);
-    char *r = spec + 2;
+    char* spec = atom_string(atom).ptr;
+    char* r = spec + 2;
     switch(spec[0]){
     case 'x': *left = prec; break;
     case 'y': *left = prec - 1; break;
@@ -1452,21 +1680,21 @@ Term* combine_terms(integer_t prec, Term*** terms){
             if(left_prec && !left_term){ 
                 D_PARSE{
                     fprintf(stderr, "missing left operand for '%s' '%s'\n",
-                            atom_string(op_spec), atom_string(name));
+                            atom_string(op_spec).ptr, atom_string(name).ptr);
                 }
                 continue;
             }
             if(left_term && !left_prec){
                 D_PARSE{
                     fprintf(stderr, "extra left operand for '%s' '%s'\n",
-                            atom_string(op_spec), atom_string(name));
+                            atom_string(op_spec).ptr, atom_string(name).ptr);
                 }
                 continue;
             }
             if(left_prec > prec){
                 D_PARSE{
                     fprintf(stderr, "dropping '%s', too loose (%ld <= %ld)\n",
-                            atom_string(name), left_prec, prec);
+                            atom_string(name).ptr, left_prec, prec);
                 }
                 continue;
             }
@@ -1699,7 +1927,7 @@ void load_prelude(){
 void list_vars(Term* term, HashTable* vars){
     switch(term->type){
     case VAR:
-        if(atom_string(term->data.var.name)[0] == '_') return;
+        if(atom_string(term->data.var.name).ptr[0] == '_') return;
         Term** val = HashTable_get(vars, Integer((integer_t)term));
         if(!*val) *val = term;
         break;
@@ -1850,6 +2078,7 @@ int main(int argc, char** argv){
     ops = HashTable_new(OPS_HASHTABLE_SIZE);
     interned = HashTable_new(INTERNED_TABLE_SIZE);
     atom_names = HashTable_new(INTERNED_TABLE_SIZE);
+    Streams_init();
 
     atom_cons = 1;
     atom_nil = 2;
@@ -1873,6 +2102,16 @@ int main(int argc, char** argv){
     atom_assertz_dcg = intern("assertz_dcg");
     atom_is = intern("is");
     atom_add = intern("+");
+    atom_process_create = intern("process_create");
+    atom_kill_process = intern("kill_process");
+    atom_close = intern("close");
+    atom_read = intern("read");
+    atom_write = intern("write");
+    atom_read_string = intern("read_string");
+    atom_write_string = intern("write_string");
+    atom_string_codes = intern("string_codes");
+    atom_atom_string = intern("atom_string");
+    atom_eof = intern("eof");
 
     stack = Atom(atom_empty);
 

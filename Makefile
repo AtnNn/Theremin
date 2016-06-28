@@ -5,5 +5,8 @@ LDFLAGS ?=
 poorlog: boot/poorlog.c
 	$(CC) $(CCFLAGS) $(LDFLAGS) -o $@ $^
 
+test:
+	./boot/test/run
+
 clean:
 	rm -rf poorlog 
