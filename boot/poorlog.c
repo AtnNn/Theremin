@@ -1491,6 +1491,10 @@ Term* parse_args(char **str, atom_t atom, HashTable* vars){
     Term* list = Atom(atom_nil);
     functor_size_t count = 0;
     while(true){
+        if(*pos == ')'){
+            pos++;
+            break;
+        }
         Term* term = parse_term_vars(&pos, vars, ",");
         if(!term){
             return NULL;
@@ -1801,7 +1805,11 @@ Term* parse_term_vars(char** str, HashTable* vars, char* end_chars){
             fatal_error("Over 1024 non-parenthesized terms in a row");
         }
         terms[i++] = term;
-        D_PARSE{ trace_term("constructed subterm", term); }
+        D_PARSE{
+            trace_term("constructed subterm", term);
+            char buf[20];
+            debug("rest: %s\n", short_snippet(pos, buf, sizeof(buf)));
+        }
     }
     if(i == 0){
         return NULL;
