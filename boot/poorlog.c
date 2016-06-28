@@ -185,7 +185,7 @@ void Streams_init(){
     }
 }
 
-void Streams_close_all(){
+void Streams_close_after_fork(){
     while(free_stream < MAX_STREAMS){
         Stream* stream = &streams[free_stream];
         free_stream = stream->fd;
@@ -229,6 +229,13 @@ void Stream_close(int n){
     free(streams[n].buf);
     streams[n].pos = 1;
     streams[n].alloc_size = 0;
+}
+
+Stream* Stream_get(int n){
+    if(n >= MAX_STREAMS || streams[n].pos > streams[n].alloc_size) {
+        fatal_error("invalid stream");
+    }
+    return &streams[n];
 }
 
 Buffer* Buffer_new(size_t size){
@@ -812,6 +819,14 @@ Term* List_tail(Term* list){
     return args[1];
 }
 
+integer_t List_length(Term* list){
+    integer_t ret = 0;
+    for(; !Atom_eq(list, atom_nil); list = List_tail(list)){
+        ret++;
+    }
+    return ret;
+}
+
 bool Term_exact_eq(Term* a, Term* b){
     a = chase(a);
     b = chase(b);
@@ -1267,7 +1282,7 @@ bool process_create(char* path, char** args, int* in, int* out, int* err, int* p
         res = dup2(pipes[3], 1); guarantee_errno(res >=0, "dup2");
         res = close(pipes[4]); guarantee_errno(res >=0, "close");
         res = dup2(pipes[5], 2); guarantee_errno(res >=0, "dup2");
-        Streams_close_all();
+        Streams_close_after_fork();
         execvp(path, args);
         dup2(new_err, 2);
         guarantee_errno(false, "execvp");
@@ -1360,17 +1375,65 @@ bool prim_write_string(Term** args){
 }
 
 bool prim_read_string(Term** args){
-    // TODO: use buffer
-    integer_t stream = Term_integer(args[0]);
+    integer_t stream_id = Term_integer(args[0]);
     integer_t max = Term_integer(args[1]);
     char buf[max];
-    ssize_t res = read(streams[stream].fd, buf, max);
-    if(res == 0){
-        return unify(args[2], Atom(atom_eof));
-    }else if(res >= 1){
-        return unify(args[2], String(buf, res));
+    Stream* stream = Stream_get(stream_id);
+    if(stream->size > max){
+        bool ret = unify(args[2], String(stream->buf + stream->pos, max));
+        stream->pos += max;
+        return ret;
+    }else if(stream->size > 0){
+        bool ret = unify(args[2], String(stream->buf + stream->pos, stream->size));
+        stream->pos = 0;
+        stream->size = 0;
+        free(stream->buf);
+        stream->buf = NULL;
+        stream->alloc_size = 0;
+        return ret;        
     }else{
-        return error("warning: read failed: %s\n", strerror(errno));
+        ssize_t res = read(stream->fd, buf, max);
+        if(res == 0){
+            return unify(args[2], Atom(atom_eof));
+        }else if(res >= 1){
+            return unify(args[2], String(buf, res));
+        }else{
+            return error("warning: read failed: %s\n", strerror(errno));
+        }
+    }
+}
+
+bool prim_string_codes(Term** args){
+    Term* string = chase(args[0]);
+    Term* codes = chase(args[1]);
+
+    if(string->type == VAR){
+        disable_gc();
+        Term* term = Pool_add_term_gc(pool);
+        term->type = STRING;
+        size_t size = List_length(codes);
+        term->data.string.size = size;
+        term->data.string.ptr = system_alloc(size);
+        size_t n = 0;
+        for(Term* list = codes; !Atom_eq(list, atom_nil); list = List_tail(list)){
+            term->data.string.ptr[n++] = Term_integer(List_head(list));
+        }
+        bool ret = unify(string, term);
+        enable_gc();
+        return ret;
+    }else{
+        disable_gc();
+        string_t s = Term_string(string);
+        Term* root = NULL;
+        Term** list = &root;
+        for(size_t i = 0; i < s.size; i++){
+            *list = Functor2(atom_cons, Integer(s.ptr[i]), NULL);
+            list = &(*list)->data.functor.args[1];
+        }
+        *list = Atom(atom_nil);
+        bool ret = unify(codes, root);
+        enable_gc();
+        return ret;
     }
 }
 
@@ -1398,7 +1461,7 @@ prim_t find_prim(atom_t atom, functor_size_t size){
     //PRIM(read, 2, read);
     PRIM(write_string, 2, write_string);
     PRIM(read_string, 3, read_string);
-    //PRIM(string_codes, 2, string_codes);
+    PRIM(string_codes, 2, string_codes);
     //PRIM(atom_string, 2, atom_string);
 #undef PRIM
 
