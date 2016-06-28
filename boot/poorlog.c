@@ -614,16 +614,15 @@ hash_t hash(Term* term){
     return hash_rec(term, hash);
 }
 
-atom_t intern(char* string){
+atom_t intern(Term* str){
     disable_gc();
-    Term* str = String_nt(string);
     Term** term = HashTable_get(interned, str);
     if(*term){
         if((*term)->type != FUNCTOR){
             fatal_error("interned term is not an atom");
         }
         D_ATOM{
-            debug("already interned %s as %lu\n", string, (*term)->data.functor.atom);
+            debug("already interned %s as %lu\n", str->data.string.ptr, (*term)->data.functor.atom);
         }
         enable_gc();
         return (*term)->data.functor.atom;
@@ -633,10 +632,17 @@ atom_t intern(char* string){
     Term** rev = HashTable_get(atom_names, *term);
     *rev = str;
     D_ATOM{
-        debug("interning %s as %lu\n", string, atom);
+        debug("interning %s as %lu\n", str->data.string.ptr, atom);
     }
     enable_gc();
     return atom;
+}
+
+atom_t intern_nt(char* string){
+    disable_gc();
+    atom_t ret = intern(String_nt(string));
+    enable_gc();
+    return ret;
 }
 
 void intern_prim(char* string, atom_t atom){
@@ -1437,11 +1443,31 @@ bool prim_string_codes(Term** args){
     }
 }
 
+bool prim_atom_string(Term** args){
+    Term* atom = chase(args[0]);
+    Term* string = chase(args[1]);
+    if(atom->type == FUNCTOR && atom->data.functor.size == 0){
+        disable_gc();
+        string_t s = atom_string(args[0]->data.functor.atom);
+        bool ret = unify(string, String(s.ptr, s.size));
+        enable_gc();
+        return ret;
+    }else if(string->type == STRING){
+        disable_gc();
+        bool ret = unify(atom, Atom(intern(string)));
+        enable_gc();
+        return ret;
+    }else{
+        fatal_error("invalid arguments to atom_string");
+        UNREACHABLE;
+    }
+}
+
 prim_t find_prim(atom_t atom, functor_size_t size){
 
 #define PRIM(f, n, r) \
     static atom_t atom_ ## r = 0; \
-    if(!atom_ ## r) atom_ ## r = intern(#f); \
+    if(!atom_ ## r) atom_ ## r = intern_nt(#f); \
     if(atom == atom_ ## r && size == n){ return prim_ ## r; }
 
     PRIM(print, 1, print);
@@ -1462,7 +1488,7 @@ prim_t find_prim(atom_t atom, functor_size_t size){
     PRIM(write_string, 2, write_string);
     PRIM(read_string, 3, read_string);
     PRIM(string_codes, 2, string_codes);
-    //PRIM(atom_string, 2, atom_string);
+    PRIM(atom_string, 2, atom_string);
 #undef PRIM
 
     return NULL;
@@ -1634,12 +1660,12 @@ Term* parse_atomic(char** str, HashTable* vars){
             }else{
                 Term** var_term = HashTable_get(vars, String_nt(buf));
                 if(!*var_term){
-                    *var_term = Var(intern(buf));
+                    *var_term = Var(intern_nt(buf));
                 }
                 term = *var_term;
             }
         }else{
-            term = Atom(intern(buf));
+            term = Atom(intern_nt(buf));
         }
     }
     *str = pos;
@@ -2027,7 +2053,7 @@ void load_prelude(){
     disable_gc();
 
 #define ADD_OP(prec, order, name) \
-    HashTable_append(ops, Atom(intern(name)), Functor3(atom_op, Integer(prec), Atom(intern(order)), Atom(intern(name))))
+    HashTable_append(ops, Atom(intern_nt(name)), Functor3(atom_op, Integer(prec), Atom(intern_nt(order)), Atom(intern_nt(name))))
     ADD_OP(1200, "xfx", ":-");
     ADD_OP(1200, "xfx", "-->");
     ADD_OP(1200, "fx", ":-");
@@ -2210,30 +2236,30 @@ int main(int argc, char** argv){
     intern_prim("[]", atom_nil);
     intern_prim(":", atom_colon);
 
-    atom_slash = intern("/");
-    atom_op = intern("op");
-    atom_entails = intern(":-");
-    atom_drop = intern("drop");
-    atom_frame = intern("frame");
-    atom_eq = intern("=");
-    atom_comma = intern(",");
-    atom_empty = intern("empty");
-    atom_true = intern("true");
-    atom_underscore = intern("_");
-    atom_rarrow = intern("-->");
-    atom_assertz_dcg = intern("assertz_dcg");
-    atom_is = intern("is");
-    atom_add = intern("+");
-    atom_process_create = intern("process_create");
-    atom_kill_process = intern("kill_process");
-    atom_close = intern("close");
-    atom_read = intern("read");
-    atom_write = intern("write");
-    atom_read_string = intern("read_string");
-    atom_write_string = intern("write_string");
-    atom_string_codes = intern("string_codes");
-    atom_atom_string = intern("atom_string");
-    atom_eof = intern("eof");
+    atom_slash = intern_nt("/");
+    atom_op = intern_nt("op");
+    atom_entails = intern_nt(":-");
+    atom_drop = intern_nt("drop");
+    atom_frame = intern_nt("frame");
+    atom_eq = intern_nt("=");
+    atom_comma = intern_nt(",");
+    atom_empty = intern_nt("empty");
+    atom_true = intern_nt("true");
+    atom_underscore = intern_nt("_");
+    atom_rarrow = intern_nt("-->");
+    atom_assertz_dcg = intern_nt("assertz_dcg");
+    atom_is = intern_nt("is");
+    atom_add = intern_nt("+");
+    atom_process_create = intern_nt("process_create");
+    atom_kill_process = intern_nt("kill_process");
+    atom_close = intern_nt("close");
+    atom_read = intern_nt("read");
+    atom_write = intern_nt("write");
+    atom_read_string = intern_nt("read_string");
+    atom_write_string = intern_nt("write_string");
+    atom_string_codes = intern_nt("string_codes");
+    atom_atom_string = intern_nt("atom_string");
+    atom_eof = intern_nt("eof");
 
     stack = Atom(atom_empty);
 
