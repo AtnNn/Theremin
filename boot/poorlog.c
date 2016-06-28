@@ -174,7 +174,7 @@ void Streams_close_all(){
 
 int Stream_new(int fd){
     if(free_stream >= MAX_STREAMS){
-        fatal_error("too many open streams"); 
+        fatal_error("too many open streams");
     }
     int ret = free_stream;
     Stream* s = &streams[ret];
@@ -540,7 +540,7 @@ hash_t hash_atom(atom_t atom, hash_t hash){
     for(int i = 0; i < sizeof(atom); i++){
         hash = hash_byte(c[i], hash);
     }
-    return hash;    
+    return hash;
 }
 
 hash_t hash_rec(Term* term, hash_t hash){
@@ -640,7 +640,7 @@ string_t atom_string(atom_t atom){
     Term* term = HashTable_find(atom_names, Atom(atom));
     if(!term){
         int n = snprintf(buf, sizeof(buf), "#atom%lu", atom);
-        return mkstring(buf, n);
+        return String(buf, n)->data.string;
     }
     if(term->type != STRING) fatal_error("atom names table contains non-string");
     return term->data.string;
@@ -660,7 +660,6 @@ void Term_render(Term* term, bool show_vars, renderer_t write, void* data){
         break;
     case VAR:
         if(term->data.var.ref != term){
-            write(data, "%", 1);
             Term_render(term->data.var.ref, show_vars, write, data);
         }else{
             string_t name = atom_string(term->data.var.name);
@@ -820,7 +819,7 @@ Term** Assoc_get(Term** assoc, Term* key){
                     trace_term("hash collision", key);
                 }
             }
-            return &args[1]; 
+            return &args[1];
         }
     }
     disable_gc();
@@ -934,7 +933,7 @@ Term* Term_copy_rec(Term* term, HashTable* vars){
         return *copy;
     }
     case MOVED:
-        fatal_error("Cannot copy a moved term"); 
+        fatal_error("Cannot copy a moved term");
         return NULL;
     default:
         UNREACHABLE;
@@ -1002,7 +1001,7 @@ bool stack_push(atom_t atom, functor_size_t size, Term* term){
     Term* rules = HashTable_find(globals, Spec(atom, size));
     enable_gc();
     if(!rules){
-        return error("No such predicate '%s'/%u", atom_string(atom), size);
+        return error("No such predicate '%s'/%u", atom_string(atom).ptr, size);
     }
     disable_gc();
     Term* branches = Atom(atom_nil);
@@ -1201,7 +1200,7 @@ bool prim_univ(Term** args){
     }else if(functor->type == FUNCTOR){
         disable_gc();
         Term* list = Functor2(atom_cons, Atom(functor->data.functor.atom), NULL);
-        Term** rest = &list->data.functor.args[1]; 
+        Term** rest = &list->data.functor.args[1];
         for(functor_size_t i = 0; i < functor->data.functor.size; i++){
             *rest = Functor2(atom_cons, functor->data.functor.args[i], NULL);
             rest = &(*rest)->data.functor.args[1];
@@ -1249,17 +1248,23 @@ bool process_create(char* path, char** args, int* in, int* out, int* err, int* p
 }
 
 string_t Term_string(Term* term){
-    if(term->type != STRING){
+    term = chase(term);
+    if(term->type == STRING){
+        return term->data.string;
+    }else if(term->type == FUNCTOR && term->data.functor.size == 0){
+        return atom_string(term->data.functor.atom);
+    }else{
         fatal_error("expected string");
+        UNREACHABLE;
     }
-    return term->data.string;
 }
 
 integer_t Term_integer(Term* term){
+    term = chase(term);
     if(term->type != INTEGER){
         fatal_error("expected integer");
     }
-    return term->data.integer;    
+    return term->data.integer;
 }
 
 bool prim_process_create(Term** args){
@@ -1312,6 +1317,7 @@ bool prim_write_string(Term** args){
 }
 
 bool prim_read_string(Term** args){
+    // TODO: use buffer
     integer_t stream = Term_integer(args[0]);
     integer_t max = Term_integer(args[1]);
     char buf[max];
@@ -1381,7 +1387,7 @@ bool eval_query(){
             if(atom == atom_comma && size == 2){
                 disable_gc();
                 next_query = next_query ? Functor2(atom_comma, args[1], next_query) : args[1];
-                query = args[0]; 
+                query = args[0];
                 enable_gc();
                 continue;
             }
@@ -1451,7 +1457,7 @@ Term* parse_args(char **str, atom_t atom, HashTable* vars){
             pos = spaces(pos + 1);
         }else if(*pos == ')'){
             pos++;
-            break; 
+            break;
         }else{
             return NULL;
         }
@@ -1699,7 +1705,7 @@ Term* combine_terms(integer_t prec, Term*** terms){
                 continue;
             }
             Term* right_term = NULL;
-            Term** cur = pos + 1; 
+            Term** cur = pos + 1;
             if(right_prec){
                 right_term = combine_terms(right_prec, &cur);
                 if(!right_term){
@@ -1730,7 +1736,7 @@ Term* combine_terms(integer_t prec, Term*** terms){
 }
 
 Term* parse_term_vars(char** str, HashTable* vars, char* end_chars){
-    char* pos = *str; 
+    char* pos = *str;
     D_PARSE{
         char buf[11];
         fprintf(stderr, "parsing substr: %s\n", short_snippet(pos, buf, sizeof buf));
