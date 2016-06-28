@@ -101,6 +101,7 @@ Term* parse_term_vars(char** str, HashTable* vars, char* end_char);
 bool assertz(Term* term);
 Term** HashTable_get(HashTable* table, Term* key);
 Term* HashTable_find(HashTable* table, Term* key);
+void fatal_error(char* format, ...);
 
 Pool* pool = NULL;
 HashTable* globals = NULL;
@@ -139,12 +140,37 @@ bool* debug_enabled = &prelude_loaded;
 bool always = true;
 bool evaluating = false;
 
+#define guarantee(p, ...) do{ if(!(p)){ fatal_error(__VA_ARGS__); } }while(0)
+#define guarantee_errno(p, f) guarantee(p, "%s failed: %s", f, strerror(errno))
+#define debug(...) do{ int _debug_res = fprintf(stderr, __VA_ARGS__); guarantee_errno(_debug_res, "fprintf"); }while(0)
+
+void* system_alloc(size_t size){
+    void* ret = malloc(size);
+    if(!ret){
+        fprintf(stderr, "fatal error: memory allocation failed: %s\n", strerror(errno));
+        exit(1);
+    }
+    return ret;
+}
+
+void* system_realloc(void* p, size_t size){
+    void* ret = realloc(p, size);
+    if(!ret){
+        fprintf(stderr, "fatal error: memory allocation failed: %s\n", strerror(errno));
+        exit(1);
+    }
+    return ret;
+}
+
 void fatal_error(char* format, ...){
     va_list argptr;
     va_start(argptr, format);
-    fprintf(stderr, "fatal error: ");
-    vfprintf(stderr, format, argptr);
-    fprintf(stderr, "\n");
+    int res = fprintf(stderr, "fatal error: ");
+    guarantee_errno(res >= 0, "fprintf");
+    res = vfprintf(stderr, format, argptr);
+    guarantee_errno(res >= 0, "vfprintf");
+    res = fprintf(stderr, "\n");
+    guarantee_errno(res >= 0, "fprintf");
     va_end(argptr);
     exit(1);
     UNREACHABLE;
@@ -167,7 +193,10 @@ void Streams_close_all(){
     }
     for(int n = 0; n < MAX_STREAMS; n++){
         if(streams[n].fd > 2){
-            close(streams[n].fd);
+            int res = close(streams[n].fd);
+            if(res < 0){
+                debug("warning: close failed: %s\n", strerror(errno));
+            }
         }
     }
 }
@@ -191,7 +220,10 @@ void Stream_close(int n){
     if(n >= MAX_STREAMS || streams[n].pos > streams[n].alloc_size) {
         fatal_error("invalid stream");
     }
-    close(streams[n].fd);
+    int res = close(streams[n].fd);
+    if(res < 0){
+        debug("warning: close failed: %s\n", strerror(errno));
+    }
     streams[n].fd = free_stream;
     free_stream = n;
     free(streams[n].buf);
@@ -200,10 +232,10 @@ void Stream_close(int n){
 }
 
 Buffer* Buffer_new(size_t size){
-    Buffer* buffer = malloc(sizeof(Buffer));
+    Buffer* buffer = system_alloc(sizeof(Buffer));
     buffer->size = size;
     buffer->pos = 0;
-    buffer->str = malloc(size + 1);
+    buffer->str = system_alloc(size + 1);
     buffer->str[0] = 0;
     buffer->str[size] = 0;
     return buffer;
@@ -215,15 +247,15 @@ void Buffer_free(Buffer* buffer){
 }
 
 void Buffer_resize(Buffer* buffer, size_t size){
-    buffer->str = realloc(buffer->str, size + 1);
+    buffer->str = system_realloc(buffer->str, size + 1);
     buffer->size = size;
     buffer->str[size] = 0;
 }
 
 HashTable* HashTable_new(size_t size){
-    HashTable* table = malloc(sizeof(HashTable) + sizeof(Term*) * (size - 1));
+    HashTable* table = system_alloc(sizeof(HashTable) + sizeof(Term*) * (size - 1));
     D_HASHTABLE{
-        fprintf(stderr, "new hashtable %p of size %zu\n", (void*)table, size);
+        debug("new hashtable %p of size %zu\n", (void*)table, size);
     }
     table->size = size;
     memset(table->table, 0, sizeof(Term*) * size);
@@ -232,7 +264,7 @@ HashTable* HashTable_new(size_t size){
 
 void HashTable_free(HashTable* table){
     D_HASHTABLE{
-        fprintf(stderr, "freeing hashtable %p\n", (void*)table);
+        debug("freeing hashtable %p\n", (void*)table);
     }
     free(table);
 }
@@ -240,26 +272,29 @@ void HashTable_free(HashTable* table){
 bool error(char* format, ...){
     va_list argptr;
     va_start(argptr, format);
-    fprintf(stderr, "error: ");
-    vfprintf(stderr, format, argptr);
-    fprintf(stderr, "\n");
+    int res = fprintf(stderr, "error: ");
+    guarantee_errno(res >= 0, "fprintf");
+    res = vfprintf(stderr, format, argptr);
+    guarantee_errno(res >= 0, "vfprintf");
+    res = fprintf(stderr, "\n");
+    guarantee_errno(res >= 0, "fprintf");
     va_end(argptr);
     return false;
 }
 
 Pool* Pool_new(){
-    Pool* pool = malloc(sizeof(Pool));
+    Pool* pool = system_alloc(sizeof(Pool));
     pool->sections = 1;
     pool->free = 0;
-    pool->terms = malloc(sizeof(Term*));
-    pool->terms[0] = malloc(sizeof(Term) * POOL_SECTION_SIZE);
+    pool->terms = system_alloc(sizeof(Term*));
+    pool->terms[0] = system_alloc(sizeof(Term) * POOL_SECTION_SIZE);
     return pool;
 }
 
 void trace_pool_info(char* str, Pool* pool){
-    fprintf(stderr, "%s: %zu used, %zu available in %zu sections%s\n",
-            str,  pool->free, pool->sections * POOL_SECTION_SIZE,
-            pool->sections, would_gc ? " (would gc)" :"");
+    debug("%s: %zu used, %zu available in %zu sections%s\n",
+          str,  pool->free, pool->sections * POOL_SECTION_SIZE,
+          pool->sections, would_gc ? " (would gc)" :"");
 }
 
 void Term_destroy(Term* term){
@@ -294,8 +329,8 @@ void Pool_free(Pool* pool){
 void Pool_expand(Pool* pool){
     D_GC{ trace_pool_info("expanding", pool); }
     pool->sections++;
-    pool->terms = realloc(pool->terms, sizeof(Term*) * pool->sections);
-    pool->terms[pool->sections-1] = malloc(sizeof(Term) * POOL_SECTION_SIZE);
+    pool->terms = system_realloc(pool->terms, sizeof(Term*) * pool->sections);
+    pool->terms[pool->sections-1] = system_alloc(sizeof(Term) * POOL_SECTION_SIZE);
     D_GC{ trace_pool_info("expanded", pool); }
 }
 
@@ -397,14 +432,14 @@ Term* Integer(integer_t n){
 string_t mkstring_nt(char* str){
     string_t ret;
     ret.size = strlen(str);
-    ret.ptr = memcpy(malloc(ret.size + 1), str, ret.size + 1);
+    ret.ptr = memcpy(system_alloc(ret.size + 1), str, ret.size + 1);
     return ret;
 }
 
 string_t mkstring(char* str, size_t size){
     string_t ret;
     ret.size = size;
-    ret.ptr = memcpy(malloc(size + 1), str, size + 1);
+    ret.ptr = memcpy(system_alloc(size + 1), str, size + 1);
     ret.ptr[size] = 0;
     return ret;
 }
@@ -455,7 +490,7 @@ Term* Functor_unsafe(atom_t atom, functor_size_t size){
     term->type = FUNCTOR;
     term->data.functor.atom = atom;
     term->data.functor.size = size;
-    term->data.functor.args = malloc(sizeof(Term*) * size);
+    term->data.functor.args = system_alloc(sizeof(Term*) * size);
     for(functor_size_t i = 0; i < size; i++){
         term->data.functor.args[i] = NULL;
     }
@@ -581,7 +616,7 @@ atom_t intern(char* string){
             fatal_error("interned term is not an atom");
         }
         D_ATOM{
-            fprintf(stderr, "already interned %s as %lu\n", string, (*term)->data.functor.atom);
+            debug("already interned %s as %lu\n", string, (*term)->data.functor.atom);
         }
         enable_gc();
         return (*term)->data.functor.atom;
@@ -591,7 +626,7 @@ atom_t intern(char* string){
     Term** rev = HashTable_get(atom_names, *term);
     *rev = str;
     D_ATOM{
-        fprintf(stderr, "interning %s as %lu\n", string, atom);
+        debug("interning %s as %lu\n", string, atom);
     }
     enable_gc();
     return atom;
@@ -608,7 +643,7 @@ void intern_prim(char* string, atom_t atom){
     Term** rev = HashTable_get(atom_names, *term);
     *rev = str;
     D_ATOM{
-        fprintf(stderr, "interning primitve %s as %lu\n", string, atom);
+        debug("interning primitve %s as %lu\n", string, atom);
     }
     enable_gc();
 }
@@ -732,7 +767,7 @@ void trace_term(char* format, Term* term, ...){
     va_start(argptr, term);
     vfprintf(stderr, format, argptr);
     Buffer* buffer = Term_show(term, true);
-    fprintf(stderr, ": %s\n", short_snippet(buffer->str, buf, sizeof buf));
+    debug(": %s\n", short_snippet(buffer->str, buf, sizeof buf));
     Buffer_free(buffer);
     va_end(argptr);
 }
@@ -849,7 +884,7 @@ Term** HashTable_get(HashTable* table, Term* key){
     hash_t hkey = hash(key);
     Term** assoc = &table->table[hkey % table->size];
     D_HASHTABLE{
-        fprintf(stderr, "hashtable %p get:\n", (void*)table);
+        debug("hashtable %p get:\n", (void*)table);
         trace_term("key (hash %u)", key, hkey);
         trace_term("assoc", *assoc);
     }
@@ -871,7 +906,7 @@ void HashTable_append(HashTable* table, Term* key, Term* val){
     (*list) = Functor2(atom_cons, val, *list ? *list : Atom(atom_nil));
     enable_gc();
     D_HASHTABLE{
-        fprintf(stderr, "hashtable %p: append\n", (void*)table);
+        debug("hashtable %p: append\n", (void*)table);
         trace_term("key", key);
         trace_term("val", val);
     }
@@ -886,7 +921,8 @@ Term* HashTable_find(HashTable* table, Term* key){
 }
 
 void render_fprintf(FILE* out, char* str, size_t size){
-    fprintf(out, "%.*s", (int)size, str);
+    int res = fprintf(out, "%.*s", (int)size, str);
+    guarantee_errno(res >= 0, "fprintf");
 }
 
 void Term_print(Term* term){
@@ -1031,7 +1067,7 @@ bool stack_push(atom_t atom, functor_size_t size, Term* term){
 
 bool stack_next(bool success){
     D_EVAL{
-        fprintf(stderr, "stack_next(%s)\n", success ? "true" : "fail");
+        debug("stack_next(%s)\n", success ? "true" : "fail");
         trace_term("stack_next stack", stack);
         if(next_query){
             trace_term("stack_next next_query", next_query);
@@ -1217,31 +1253,32 @@ bool prim_univ(Term** args){
 
 bool process_create(char* path, char** args, int* in, int* out, int* err, int* pid_out){
     int pipes[6];
-    pipe(&pipes[0]);
-    pipe(&pipes[2]);
-    pipe(&pipes[4]);
+    int res;
+    guarantee_errno(!pipe(&pipes[0]), "pipe");
+    guarantee_errno(!pipe(&pipes[2]), "pipe");
+    guarantee_errno(!pipe(&pipes[4]), "pipe");
     int pid = fork();
-    if(pid < 0){
-        fatal_error("fork failed");
-        UNREACHABLE;
-    }else if(pid == 0){
-        dup2(pipes[0], 0);
-        close(pipes[1]);
-        close(pipes[2]);
-        dup2(pipes[3], 1);
-        close(pipes[4]);
-        dup2(pipes[5], 2);
+    guarantee_errno(pid >= 0, "fork");
+    if(pid == 0){
+        int new_err = dup(2); guarantee_errno(new_err >= 0, "dup");
+        res = dup2(pipes[0], 0); guarantee_errno(res >=0, "dup2");
+        res = close(pipes[1]); guarantee_errno(res >=0, "close");
+        res = close(pipes[2]); guarantee_errno(res >=0, "close");
+        res = dup2(pipes[3], 1); guarantee_errno(res >=0, "dup2");
+        res = close(pipes[4]); guarantee_errno(res >=0, "close");
+        res = dup2(pipes[5], 2); guarantee_errno(res >=0, "dup2");
         Streams_close_all();
-        execv(path, args);
-        exit(-1);
+        execvp(path, args);
+        dup2(new_err, 2);
+        guarantee_errno(false, "execvp");
         UNREACHABLE;
     }else{
-        close(pipes[0]);
+        res = close(pipes[0]); guarantee_errno(res >=0, "close");
         *in = Stream_new(pipes[1]);
         *out = Stream_new(pipes[2]);
-        close(pipes[3]);
+        res = close(pipes[3]); guarantee_errno(res >=0, "close");
         *err = Stream_new(pipes[4]);
-        close(pipes[5]);
+        res = close(pipes[5]); guarantee_errno(res >=0, "close");
         *pid_out = pid;
         return true;
     }
@@ -1271,7 +1308,8 @@ bool prim_process_create(Term** args){
     disable_gc();
     char* command_path = Term_string(args[0]).ptr;
     char* command_args[256];
-    int n = 0;
+    command_args[0] = command_path;
+    int n = 1;
     for(Term* list = args[1]; !Atom_eq(list, atom_nil); list = List_tail(list)){
         if(n >= sizeof(command_args) - 1){
             fatal_error("too many arguments for process");
@@ -1296,7 +1334,8 @@ bool prim_kill_process(Term** args){
     if(pid->type != INTEGER){
         fatal_error("kill_process expects an integer");
     }
-    kill(pid->data.integer, SIGTERM);
+    int res = kill(pid->data.integer, SIGTERM);
+    guarantee_errno(res >= 0, "kill");
     return true;
 }
 
@@ -1312,8 +1351,12 @@ bool prim_close(Term** args){
 bool prim_write_string(Term** args){
     int stream = Term_integer(args[0]);
     string_t str = Term_string(args[1]);
-    write(streams[stream].fd, str.ptr, str.size);
-    return true;
+    ssize_t res = write(streams[stream].fd, str.ptr, str.size);
+    if(res >= 0){
+        return true;
+    }else{
+        return error("warning: write failed: %s\n", strerror(errno));
+    }
 }
 
 bool prim_read_string(Term** args){
@@ -1324,8 +1367,10 @@ bool prim_read_string(Term** args){
     ssize_t res = read(streams[stream].fd, buf, max);
     if(res == 0){
         return unify(args[2], Atom(atom_eof));
-    }else{
+    }else if(res >= 1){
         return unify(args[2], String(buf, res));
+    }else{
+        return error("warning: read failed: %s\n", strerror(errno));
     }
 }
 
@@ -1647,7 +1692,7 @@ Term* combine_terms(integer_t prec, Term*** terms){
     Term* left_term = NULL;
     while(true){
         if(!*pos){
-            D_PARSE{ fprintf(stderr, "no more terms to combine\n"); }
+            D_PARSE{ debug("no more terms to combine\n"); }
             *terms = pos;
             return left_term;
         }
@@ -1685,21 +1730,21 @@ Term* combine_terms(integer_t prec, Term*** terms){
             op_type(args[0]->data.integer, op_spec, &left_prec, &right_prec);
             if(left_prec && !left_term){ 
                 D_PARSE{
-                    fprintf(stderr, "missing left operand for '%s' '%s'\n",
+                    debug("missing left operand for '%s' '%s'\n",
                             atom_string(op_spec).ptr, atom_string(name).ptr);
                 }
                 continue;
             }
             if(left_term && !left_prec){
                 D_PARSE{
-                    fprintf(stderr, "extra left operand for '%s' '%s'\n",
+                    debug("extra left operand for '%s' '%s'\n",
                             atom_string(op_spec).ptr, atom_string(name).ptr);
                 }
                 continue;
             }
             if(left_prec > prec){
                 D_PARSE{
-                    fprintf(stderr, "dropping '%s', too loose (%ld <= %ld)\n",
+                    debug("dropping '%s', too loose (%ld <= %ld)\n",
                             atom_string(name).ptr, left_prec, prec);
                 }
                 continue;
@@ -1713,7 +1758,7 @@ Term* combine_terms(integer_t prec, Term*** terms){
                 }
             }
             if(ret){
-                D_PARSE{ fprintf(stderr, "rejecting possibly ambiguous parse\n"); }
+                D_PARSE{ debug("rejecting possibly ambiguous parse\n"); }
                 return NULL;
             }
             ret = !right_prec ? Functor1(name, left_term) :
@@ -1726,7 +1771,7 @@ Term* combine_terms(integer_t prec, Term*** terms){
                 *terms = pos;
                 return left_term;
             }
-            D_PARSE{ fprintf(stderr, "nothing to combine\n"); }
+            D_PARSE{ debug("nothing to combine\n"); }
             return NULL;
         }
         left_term = ret;
@@ -1739,7 +1784,7 @@ Term* parse_term_vars(char** str, HashTable* vars, char* end_chars){
     char* pos = *str;
     D_PARSE{
         char buf[11];
-        fprintf(stderr, "parsing substr: %s\n", short_snippet(pos, buf, sizeof buf));
+        debug("parsing substr: %s\n", short_snippet(pos, buf, sizeof buf));
     }
     Term* terms[MAX_NO_PAREN_TERMS + 1];
     size_t i = 0;
@@ -1793,7 +1838,7 @@ Term* parse_term_partial(char** str){
 }
 
 Term* parse_term(char* str){
-    D_PARSE{ fprintf(stderr, "\nparsing str: %s\n", str); }
+    D_PARSE{ debug("\nparsing str: %s\n", str); }
     Term* term = parse_term_partial(&str);
     if(*str){
         D_PARSE{ trace_term("partial parse", term); }
@@ -1881,13 +1926,13 @@ Term* parse_file(char* path){
     if(!fp){
         fatal_error("could not open '%s': %s", path, strerror(errno));
     }
-    fseek(fp, 0, SEEK_END);
-    size_t size = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
+    int res = fseek(fp, 0, SEEK_END); guarantee_errno(res >= 0, "fseek");
+    long size = ftell(fp); guarantee_errno(size >= 0, "ftell");
+    res = fseek(fp, 0, SEEK_SET); guarantee_errno(res >= 0, "fseek");
 
     Buffer* data = Buffer_new(size);
-    fread(data->str, size, 1, fp);
-    fclose(fp);
+    size_t res_size = fread(data->str, size, 1, fp); guarantee(res_size == 1, "fread failed");
+    res = fclose(fp); guarantee(res >= 0, "fclose");
 
     Term* list = parse_toplevel(data->str);
 
