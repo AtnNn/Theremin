@@ -9,3 +9,9 @@ $ make
 $ ./poorlog -e 'between(1, 5, X), print(X), fail; nl'
 12345
 ```
+
+## Tests
+
+```
+$ make test
+```
