@@ -231,3 +231,4 @@ Some of these ideas are inspired by these languages and projects:
 * Why3 (http://why3.lri.fr/)
 * K (http://www.kframework.org/)
 * Babelsburg (https://github.com/babelsberg/babelsberg-r)
+* Picat (http://picat-lang.org/)
