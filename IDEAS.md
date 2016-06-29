@@ -229,3 +229,5 @@ Some of these ideas are inspired by these languages and projects:
 * Kythe (https://www.kythe.io/)
 * Leon (https://leon.epfl.ch/)
 * Why3 (http://why3.lri.fr/)
+* K (http://www.kframework.org/)
+* Babelsburg (https://github.com/babelsberg/babelsberg-r)
