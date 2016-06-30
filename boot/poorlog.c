@@ -466,7 +466,7 @@ int stringcmp(string_t a, string_t b){
     }else if(a.size > b.size){
         return a.size - b.size;
     }else{
-        for(int i = 0; i < a.size; i++){
+        for(size_t i = 0; i < a.size; i++){
             if(a.ptr[i] != b.ptr[i]){
                 return (int)a.ptr[i] - b.ptr[i];
             }
@@ -580,7 +580,7 @@ hash_t hash_string(string_t str, hash_t hash){
 
 hash_t hash_integer(integer_t x, hash_t hash){
     char* c = (char*)&x;
-    for(int i = 0; i < sizeof(x); i++){
+    for(size_t i = 0; i < sizeof(x); i++){
         hash = hash_byte(c[i], hash);
     }
     return hash;
@@ -588,7 +588,7 @@ hash_t hash_integer(integer_t x, hash_t hash){
 
 hash_t hash_atom(atom_t atom, hash_t hash){
     char* c = (char*)&atom;
-    for(int i = 0; i < sizeof(atom); i++){
+    for(size_t i = 0; i < sizeof(atom); i++){
         hash = hash_byte(c[i], hash);
     }
     return hash;
@@ -973,11 +973,11 @@ bool prim_print(Term** args){
     return true;
 }
 
-bool prim_fail(Term** args){
+bool prim_fail(){
     return false;
 }
 
-bool prim_true(Term** args){
+bool prim_true(){
     return true;
 }
 
@@ -1223,12 +1223,12 @@ bool prim_unify(Term** args){
     return unify(args[0], args[1]);
 }
 
-bool prim_nl(Term** args){
+bool prim_nl(){
     printf("\n");
     return true;
 }
 
-bool prim_cut(Term** args){
+bool prim_cut(){
     disable_gc();
     Term** frame = Functor_get(stack, atom_frame, 3);
     frame[0] = Atom(atom_nil);
@@ -1348,7 +1348,7 @@ bool prim_process_create(Term** args){
     char* command_path = Term_string(args[0]).ptr;
     char* command_args[256];
     command_args[0] = command_path;
-    int n = 1;
+    size_t n = 1;
     for(Term* list = args[1]; !Atom_eq(list, atom_nil); list = List_tail(list)){
         if(n >= sizeof(command_args) - 1){
             fatal_error("too many arguments for process");
@@ -1403,7 +1403,8 @@ bool prim_read_string(Term** args){
     integer_t max = Term_integer(args[1]);
     char buf[max];
     Stream* stream = Stream_get(stream_id);
-    if(stream->size > max){
+    guarantee(max > 0, "invalid argument to read_string");
+    if(stream->size > (size_t)max){
         bool ret = unify(args[2], String(stream->buf + stream->pos, max));
         stream->pos += max;
         return ret;
@@ -1833,7 +1834,7 @@ Term* combine_terms(integer_t prec, Term*** terms){
             Term* op = List_head(list);
             D_PARSE{ trace_term("trying op", op); }
             Term** args = Functor_get(op, atom_op, 3);
-            if(!args || !args[0]->type == INTEGER || args[1]->type != FUNCTOR){
+            if(!args || args[0]->type != INTEGER || args[1]->type != FUNCTOR){
                 fatal_error("invalid entry in ops table");
             }
             integer_t left_prec, right_prec;
@@ -2209,6 +2210,7 @@ void eval_stdin(char* prompt, void (*eval)(Term*)){
 }
 
 int main(int argc, char** argv){
+    (void)argc;
     char** args = argv + 1;
     char* arg;
     char* file = NULL;

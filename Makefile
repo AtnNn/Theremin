@@ -1,5 +1,5 @@
-CC ?= clang
-CCFLAGS ?= -Wall -Werror -g -std=c99 -pedantic-errors
+CC := clang
+CCFLAGS ?= -Wall -Wextra -Werror -g -std=c99 -pedantic-errors
 LDFLAGS ?=
 
 poorlog: boot/poorlog.c
@@ -9,4 +9,4 @@ test:
 	./boot/test/run
 
 clean:
-	rm -rf poorlog 
+	rm -rf poorlog
