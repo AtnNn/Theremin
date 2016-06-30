@@ -114,6 +114,7 @@ Term* query = NULL;
 Term* next_query = NULL;
 Term* keep = NULL;
 int gc_disable_count = 0;
+int alloc_disable_count = 0;
 bool would_gc = false;
 bool prelude_loaded = false;
 Stream streams[MAX_STREAMS];
@@ -290,18 +291,18 @@ bool error(char* format, ...){
 }
 
 Pool* Pool_new(){
-    Pool* pool = system_alloc(sizeof(Pool));
-    pool->sections = 1;
-    pool->free = 0;
-    pool->terms = system_alloc(sizeof(Term*));
-    pool->terms[0] = system_alloc(sizeof(Term) * POOL_SECTION_SIZE);
-    return pool;
+    Pool* ret = system_alloc(sizeof(Pool));
+    ret->sections = 1;
+    ret->free = 0;
+    ret->terms = system_alloc(sizeof(Term*));
+    ret->terms[0] = system_alloc(sizeof(Term) * POOL_SECTION_SIZE);
+    return ret;
 }
 
-void trace_pool_info(char* str, Pool* pool){
+void trace_pool_info(char* str, Pool* p){
     debug("%s: %zu used, %zu available in %zu sections%s\n",
-          str,  pool->free, pool->sections * POOL_SECTION_SIZE,
-          pool->sections, would_gc ? " (would gc)" :"");
+          str,  p->free, p->sections * POOL_SECTION_SIZE,
+          p->sections, would_gc ? " (would gc)" :"");
 }
 
 void Term_destroy(Term* term){
@@ -321,51 +322,57 @@ void Term_destroy(Term* term){
     }
 }
 
-void Pool_free(Pool* pool){
-    D_GC{ trace_pool_info("freeing", pool); }
-    for(size_t i = 0; i < pool->sections; i++){
+void Pool_free(Pool* p){
+    D_GC{ trace_pool_info("freeing", p); }
+    size_t remaining = p->free;
+    for(size_t i = 0; i < p->sections; i++){
         for(size_t j = 0; j < POOL_SECTION_SIZE; j++){
-            Term_destroy(&pool->terms[i][j]);
+            Term_destroy(&p->terms[i][j]);
+            remaining--;
+            if(!remaining){
+                goto outer;
+            }
         }
-        free(pool->terms[i]);
+        free(p->terms[i]);
     }
-    free(pool->terms);
-    free(pool);
+ outer:
+    free(p->terms);
+    free(p);
 }
 
-void Pool_expand(Pool* pool){
-    D_GC{ trace_pool_info("expanding", pool); }
-    pool->sections++;
-    pool->terms = system_realloc(pool->terms, sizeof(Term*) * pool->sections);
-    pool->terms[pool->sections-1] = system_alloc(sizeof(Term) * POOL_SECTION_SIZE);
-    D_GC{ trace_pool_info("expanded", pool); }
+void Pool_expand(Pool* p){
+    D_GC{ trace_pool_info("expanding", p); }
+    p->sections++;
+    p->terms = system_realloc(p->terms, sizeof(Term*) * p->sections);
+    p->terms[p->sections-1] = system_alloc(sizeof(Term) * POOL_SECTION_SIZE);
+    // D_GC{ trace_pool_info("expanded", p); }
 }
 
-Term* Pool_add_term_expand(Pool* pool){
-     if(pool->free >= pool->sections * POOL_SECTION_SIZE){
-        Pool_expand(pool);
+Term* Pool_add_term_expand(Pool* p){
+     if(p->free >= p->sections * POOL_SECTION_SIZE){
+        Pool_expand(p);
      }
-     Term* term = &pool->terms[pool->free / POOL_SECTION_SIZE][pool->free % POOL_SECTION_SIZE];
-     pool->free++;
+     Term* term = &p->terms[p->free / POOL_SECTION_SIZE][p->free % POOL_SECTION_SIZE];
+     p->free++;
      return term;
 }
 
-void Pool_pour(Term** term, Pool *pool){
+void Pool_pour(Term** term, Pool *p){
     if((*term)->type == MOVED){
         *term = (*term)->data.moved_to;
     }else{
-        Term* new = Pool_add_term_expand(pool);
+        Term* new = Pool_add_term_expand(p);
         memcpy(new, *term, sizeof(Term));
         (*term)->type = MOVED;
         (*term)->data.moved_to = new;
         *term = new;
         switch(new->type){
         case VAR:
-            Pool_pour(&new->data.var.ref, pool);
+            Pool_pour(&new->data.var.ref, p);
             break;
         case FUNCTOR:
             for(functor_size_t i = 0; i < new->data.functor.size; i++){
-                Pool_pour(&new->data.functor.args[i], pool);
+                Pool_pour(&new->data.functor.args[i], p);
             }
             break;
         case INTEGER:
@@ -385,24 +392,22 @@ void Pool_pour_table(HashTable* table, Pool* new){
     }
 }
 
-void gc(Pool* pool){
-    D_GC{ trace_pool_info("start gc", pool); }
+void gc(Pool** p){
+    D_GC{ trace_pool_info("start gc", *p); }
     Pool *new = Pool_new();
     D_GC{ trace_pool_info("new pool", new); }
     Pool_pour_table(globals, new);
     Pool_pour_table(ops, new);
-    Pool_pour(&stack, new);
-    Pool_pour(&query, new);
-    if(next_query){
-        Pool_pour(&next_query, new);
-    }
-    if(keep){
-        Pool_pour(&keep, new);
-    }
-    Pool_free(pool);
+    Pool_pour_table(interned, new);
+    Pool_pour_table(atom_names, new);
+    if(stack){ Pool_pour(&stack, new); }
+    if(query){ Pool_pour(&query, new); }
+    if(next_query){ Pool_pour(&next_query, new); }
+    if(keep){ Pool_pour(&keep, new);}
+    Pool_free(*p);
     Pool_expand(new);
-    pool = new;
-    D_GC{ trace_pool_info("finished gc", pool); }
+    *p = new;
+    D_GC{ trace_pool_info("finished gc", *p); }
 }
 
 void disable_gc(){
@@ -412,25 +417,29 @@ void disable_gc(){
 void enable_gc(){
     gc_disable_count--;
     if(would_gc && gc_disable_count == 0){
-        gc(pool);
+        gc(&pool);
         would_gc = false;
     }
 }
 
-Term* Pool_add_term_gc(Pool* pool){
-    if(pool->free >= pool->sections * POOL_SECTION_SIZE){
+Term* Pool_add_term_gc(Pool** p){
+    if(alloc_disable_count){
+        debug(".");
+    }
+    guarantee(!alloc_disable_count, "allocation disabled");
+    if((*p)->free >= (*p)->sections * POOL_SECTION_SIZE){
         if(gc_disable_count){
             would_gc = true;
         }else{
-            gc(pool);
+            gc(p);
         }
      }
-     Term* term = Pool_add_term_expand(pool);
+     Term* term = Pool_add_term_expand(*p);
      return term;
 }
 
 Term* Integer(integer_t n){
-    Term* term = Pool_add_term_gc(pool);
+    Term* term = Pool_add_term_gc(&pool);
     term->type = INTEGER;
     term->data.integer = n;
     return term;
@@ -467,14 +476,14 @@ int stringcmp(string_t a, string_t b){
 }
 
 Term* String(char* ptr, size_t size){
-    Term* term = Pool_add_term_gc(pool);
+    Term* term = Pool_add_term_gc(&pool);
     term->type = STRING;
     term->data.string = mkstring(ptr, size);
     return term;
 }
 
 Term* String_nt(char* str){
-    Term* term = Pool_add_term_gc(pool);
+    Term* term = Pool_add_term_gc(&pool);
     term->type = STRING;
     term->data.string = mkstring_nt(str);
     return term;
@@ -484,7 +493,7 @@ Term* Atom(atom_t atom){
     if(!atom){
         fatal_error("internal error: atom is null");
     }
-    Term* term = Pool_add_term_gc(pool);
+    Term* term = Pool_add_term_gc(&pool);
     term->type = FUNCTOR;
     term->data.functor.atom = atom;
     term->data.functor.size = 0;
@@ -493,7 +502,7 @@ Term* Atom(atom_t atom){
 }
 
 Term* Functor_unsafe(atom_t atom, functor_size_t size){
-    Term* term = Pool_add_term_gc(pool);
+    Term* term = Pool_add_term_gc(&pool);
     term->type = FUNCTOR;
     term->data.functor.atom = atom;
     term->data.functor.size = size;
@@ -551,7 +560,7 @@ Term* Functor5(atom_t atom, Term* a, Term* b, Term* c, Term* d, Term* e){
 }
 
 Term* Var(atom_t name){
-    Term* term = Pool_add_term_gc(pool);
+    Term* term = Pool_add_term_gc(&pool);
     term->type = VAR;
     term->data.var.name = name;
     term->data.var.ref = term;
@@ -685,7 +694,12 @@ Term* chase(Term* term){
 
 string_t atom_string(atom_t atom){
     static char buf[32];
-    Term* term = HashTable_find(atom_names, Atom(atom));
+    Term atom_term;
+    atom_term.type = FUNCTOR;
+    atom_term.data.functor.atom = atom;
+    atom_term.data.functor.size = 0;
+    atom_term.data.functor.args = NULL;
+    Term* term = HashTable_find(atom_names, &atom_term);
     if(!term){
         int n = snprintf(buf, sizeof(buf), "#atom%lu", atom);
         return String(buf, n)->data.string;
@@ -696,7 +710,7 @@ string_t atom_string(atom_t atom){
 
 void Term_render(Term* term, bool show_vars, renderer_t write, void* data){
     if(!term){
-        write(data, "NULL", 4);
+        write(data, "#null", 5);
         return;
     }
     if(!show_vars){
@@ -739,6 +753,8 @@ void Term_render(Term* term, bool show_vars, renderer_t write, void* data){
             write(data, ")", 1);
         }
     } break;
+    default:
+        write(data, "#invalid", 8);
     }
 }
 
@@ -775,6 +791,7 @@ char* short_snippet(char* str, char* buf, size_t size){
 }
 
 void trace_term(char* format, Term* term, ...){
+    alloc_disable_count++;
     char buf[80];
     va_list argptr;
     va_start(argptr, term);
@@ -783,6 +800,7 @@ void trace_term(char* format, Term* term, ...){
     debug(": %s\n", short_snippet(buffer->str, buf, sizeof buf));
     Buffer_free(buffer);
     va_end(argptr);
+    alloc_disable_count--;
 }
 
 Term** Functor_get(Term* term, atom_t atom, functor_size_t size){
@@ -1415,7 +1433,7 @@ bool prim_string_codes(Term** args){
 
     if(string->type == VAR){
         disable_gc();
-        Term* term = Pool_add_term_gc(pool);
+        Term* term = Pool_add_term_gc(&pool);
         term->type = STRING;
         size_t size = List_length(codes);
         term->data.string.size = size;
@@ -1952,10 +1970,12 @@ Term* parse_toplevel(char* str){
     for(; *pos; pos = spaces(pos)){
         Term* term = parse_term_partial(&pos);
         if(!term){
+            enable_gc();
             return NULL;
         }
         pos = spaces(pos);
         if(*pos != '.'){
+            enable_gc();
             return NULL;
         }
         pos++;
@@ -1963,7 +1983,11 @@ Term* parse_toplevel(char* str){
         rest = &(*rest)->data.functor.args[1];
     }
     *rest = Atom(atom_nil);
+    guarantee(!keep, "register variable in use");
+    keep = list;
     enable_gc();
+    list = keep;
+    keep = NULL;
     return list;
 }
 
@@ -2039,6 +2063,7 @@ Term* parse_file(char* path){
 }
 
 void load_file(char* path){
+    guarantee(!keep, "register not empty");
     keep = parse_file(path);
     if(!keep){
         fatal_error("failed to parse file '%s'", path);
@@ -2109,6 +2134,7 @@ Term* vars_of(Term* term){
 }
 
 void eval_interactive(Term* term){
+    guarantee(!keep, "register not empty");
     keep = vars_of(term);
     query = term;
     if(eval_query()){
@@ -2124,6 +2150,7 @@ void eval_interactive(Term* term){
     }else{
         printf("nope.\n");
     }
+    keep = NULL;
 }
 
 void eval_stdin(char* prompt, void (*eval)(Term*)){
