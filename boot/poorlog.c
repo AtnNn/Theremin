@@ -13,7 +13,7 @@
 #include <signal.h>
 int kill(pid_t, int);
 
-#define PRELUDE_PATH "boot/stdlib/prelude.pl"
+#define PRELUDE_PATH "boot/lib/prelude.pl"
 
 #define GLOBALS_SIZE 4096
 #define POOL_SECTION_SIZE 4096
