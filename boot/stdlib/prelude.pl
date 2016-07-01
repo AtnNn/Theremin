@@ -22,8 +22,8 @@ convert_dcg_body((A, B), (Ap, Bp), L, R) :-
     !,
     convert_dcg_body(A, Ap, L, X),
     convert_dcg_body(B, Bp, X, R).
-convert_dcg_body(!,!,L,L) :-
-    ! .
+convert_dcg_body(!,!,L,L) :- ! .
+convert_dcg_body({X},X,L,L) :- ! .
 convert_dcg_body([], true, L, L) :- ! .
 convert_dcg_body([H|T], append([H|T], R, L), L, R) :- ! .
 convert_dcg_body(F, G, L, R) :-
