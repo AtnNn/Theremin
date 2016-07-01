@@ -173,6 +173,9 @@ void fatal_error(char* format, ...){
     res = fprintf(stderr, "\n");
     guarantee_errno(res >= 0, "fprintf");
     va_end(argptr);
+    if(query){
+	trace_term("while evaluating", query);
+    }
     exit(1);
     UNREACHABLE;
 }
