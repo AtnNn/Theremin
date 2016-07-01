@@ -122,7 +122,7 @@ int free_stream = 0;
 
 atom_t atom_slash, atom_colon, atom_nil, atom_cons, atom_op, atom_entails,
     atom_frame, atom_drop, atom_comma, atom_eq, atom_empty, atom_true,
-    atom_underscore, atom_assertz_dcg, atom_rarrow;
+    atom_underscore, atom_assertz_dcg, atom_rarrow, atom_braces;
 
 atom_t atom_is, atom_add;
 
@@ -1761,6 +1761,18 @@ Term* parse_simple_term(char** str, HashTable* vars){
         return parse_parens(str, vars);
     case '[':
         return parse_list(str, vars);
+    case '{':
+	if(*(pos + 1) == '}'){
+	    break;
+	}
+	pos++;
+	Term* inner = parse_term_vars(&pos, vars, "}");
+	if(inner && *pos == '}'){
+	    *str = pos + 1;
+	    return Functor1(atom_braces, inner);
+	}else{
+	    return NULL;
+	}
     case '.': {
         char next = *(pos + 1);
         if(isspace(next) || !next) return NULL; }
@@ -2289,6 +2301,7 @@ int main(int argc, char** argv){
     atom_string_codes = intern_nt("string_codes");
     atom_atom_string = intern_nt("atom_string");
     atom_eof = intern_nt("eof");
+    atom_braces = intern_nt("{}");
 
     stack = Atom(atom_empty);
 
