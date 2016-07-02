@@ -138,6 +138,8 @@ atom_t atom_process_create, atom_kill_process,
     atom_string_codes, atom_atom_string,
     atom_eof;
 
+atom_t atom_string_concat;
+
 bool debug_eval = false;
 bool debug_hashtable = false;
 bool debug_gc = false;
@@ -492,6 +494,14 @@ string_t mkstring(char* str, size_t size){
     return ret;
 }
 
+string_t mkstring_unsafe(size_t size){
+    string_t ret;
+    ret.size = size;
+    ret.ptr = system_alloc(size + 1);
+    ret.ptr[size] = 0;
+    return ret;
+}
+
 int stringcmp(string_t a, string_t b){
     if(a.size < b.size){
         return -(int)(b.size - a.size);
@@ -511,6 +521,13 @@ Term* String(char* ptr, size_t size){
     Term* term = Pool_add_term_gc(&pool);
     term->type = STRING;
     term->data.string = mkstring(ptr, size);
+    return term;
+}
+
+Term* String_unsafe(size_t size){
+    Term* term = Pool_add_term_gc(&pool);
+    term->type = STRING;
+    term->data.string = mkstring_unsafe(size);
     return term;
 }
 
@@ -1538,6 +1555,33 @@ bool prim_cons(Term** args){
     return true;
 }
 
+bool prim_string_concat(Term** args){
+    if(args[0]->type == VAR){
+        string_t b = Term_string(args[1]);
+        string_t c = Term_string(args[2]);
+        if(b.size > c.size || memcmp(b.ptr, &c.ptr[c.size - b.size], b.size)){
+            return false;
+        }
+        return unify(args[0], String(c.ptr, c.size - b.size));
+    }else if(args[1]->type == VAR){
+        string_t a = Term_string(args[0]);
+        string_t c = Term_string(args[2]);
+        if(a.size > c.size || memcmp(a.ptr, c.ptr, a.size)){
+            return false;
+        }
+        return unify(args[1], String(&c.ptr[a.size], c.size - a.size));
+    }else{
+        string_t a = Term_string(args[0]);
+        string_t b = Term_string(args[1]);
+        Term** c = keep(String_unsafe(a.size + b.size));
+        memcpy((*c)->data.string.ptr, a.ptr, a.size);
+        memcpy((*c)->data.string.ptr + a.size, b.ptr, b.size);
+        bool ret = unify(args[2], *c);
+        unkeep(c);
+        return ret;
+    }
+}
+
 prim_t find_prim(atom_t atom, functor_size_t size){
 
 #define PRIM(f, n, r) \
@@ -1558,13 +1602,12 @@ prim_t find_prim(atom_t atom, functor_size_t size){
     PRIM(process_create, 6, process_create);
     PRIM(kill_process, 1, kill_process);
     PRIM(close, 1, close);
-    //PRIM(write, 2, write);
-    //PRIM(read, 2, read);
     PRIM(write_string, 2, write_string);
     PRIM(read_string, 3, read_string);
     PRIM(string_codes, 2, string_codes);
     PRIM(atom_string, 2, atom_string);
     PRIM(., 2, cons);
+    PRIM(string_concat, 3, string_concat);
 #undef PRIM
 
     return NULL;
@@ -1701,6 +1744,7 @@ Term* parse_atomic(char** str, HashTable* vars){
     char* end;
     bool var = false;
     bool integer = false;
+    bool string = false;
     integer_t n;
     if(!*pos){
         return NULL;
@@ -1713,6 +1757,11 @@ Term* parse_atomic(char** str, HashTable* vars){
         end = pos;
     }else if(*pos == '\''){
         while(*++pos != '\''){ }
+        start++;
+        end = pos++;
+    }else if(*pos == '\"'){
+        string = true;
+        while(*++pos != '\"'){ }
         start++;
         end = pos++;
     }else if(issymbol(*pos)){
@@ -1731,6 +1780,8 @@ Term* parse_atomic(char** str, HashTable* vars){
     Term * term;
     if(integer){
         term = Integer(n);
+    }else if(string){
+        term = String(start, end - start);
     }else{
         const size_t max = 1024;
         size_t len = end - start;
@@ -2376,6 +2427,7 @@ int main(int argc, char** argv){
     atom_eof = intern_nt("eof");
     atom_braces = intern_nt("{}");
     atom_library = intern_nt("library");
+    atom_string_concat = intern_nt("string_concat");
 
     stack = Atom(atom_empty);
 
