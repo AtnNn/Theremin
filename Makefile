@@ -1,5 +1,5 @@
 CC := clang
-CCFLAGS ?= -Wall -Wextra -Werror -g -std=c99 -pedantic-errors
+CCFLAGS ?= -Wall -Wextra -Werror -Wswitch-enum -Wswitch-default -g -std=c99 -pedantic-errors
 LDFLAGS ?=
 
 poorlog: boot/poorlog.c

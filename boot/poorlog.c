@@ -38,11 +38,12 @@ int kill(pid_t, int);
 #define D_HASHTABLE if(debug_hashtable && *debug_enabled)
 #define D_ATOM if(debug_atom && *debug_enabled)
 
+#define SANITY_CHECK do{ if(debug_sanity && *debug_enabled){ sanity_check_all(); } }while(0)
+
 typedef uint32_t hash_t;
 typedef uint8_t functor_size_t;
 typedef int64_t integer_t;
 typedef uint64_t atom_t;
-typedef void (*renderer_t)(void*, char*, size_t);
 
 typedef struct {
     char* ptr;
@@ -67,6 +68,8 @@ typedef struct Term {
     } data;
 } Term;
 
+typedef void (*renderer_t)(void*, char*, size_t);
+typedef void(*term_iterator_t)(Term**, void*);
 typedef bool (*prim_t)(Term**);
 typedef hash_t (*hash_function_t)(Term*);
 
@@ -107,6 +110,8 @@ Term** HashTable_get(HashTable* table, Term* key);
 Term* HashTable_find(HashTable* table, Term* key);
 void fatal_error(char* format, ...);
 void load_file(char* path);
+void Term_render(Term* term, bool show_vars, renderer_t write, void* data);
+void sanity_check_all();
 
 Pool* pool = NULL;
 HashTable* globals = NULL;
@@ -138,13 +143,14 @@ atom_t atom_process_create, atom_kill_process,
     atom_string_codes, atom_atom_string,
     atom_eof;
 
-atom_t atom_string_concat;
+atom_t atom_string_concat, atom_string;
 
 bool debug_eval = false;
 bool debug_hashtable = false;
-bool debug_gc = false;
+bool debug_gc = true;
 bool debug_atom = false;
 bool debug_parse = false;
+bool debug_sanity = false;
 bool* debug_enabled = &prelude_loaded;
 bool always = true;
 bool evaluating = false;
@@ -398,10 +404,26 @@ void Pool_pour(Term** term, Pool *p){
     }
 }
 
-void Pool_pour_table(HashTable* table, Pool* new){
+void each_live_table(HashTable* table, term_iterator_t f, void* data){
     for(size_t i = 0; i < table->size; i++){
         if(table->table[i]){
-            Pool_pour(&table->table[i], new);
+            f(&table->table[i], data);
+        }
+    }
+}
+
+void each_live_all(term_iterator_t f, void* data){
+    each_live_table(globals, f, data);
+    each_live_table(ops, f, data);
+    each_live_table(interned, f, data);
+    each_live_table(atom_names, f, data);
+    if(stack){ f(&stack, data); }
+    if(query){ f(&query, data); }
+    if(next_query){ f(&next_query, data); }
+    if(next_query){ f(&prim_queries, data); }
+    for(size_t i = 0; i < MAX_KEEPS; i++){
+        if(keeps[i]){
+            f(&keeps[i], data);
         }
     }
 }
@@ -410,19 +432,7 @@ void gc(Pool** p){
     D_GC{ trace_pool_info("start gc", *p); }
     Pool *new = Pool_new();
     D_GC{ trace_pool_info("new pool", new); }
-    Pool_pour_table(globals, new);
-    Pool_pour_table(ops, new);
-    Pool_pour_table(interned, new);
-    Pool_pour_table(atom_names, new);
-    if(stack){ Pool_pour(&stack, new); }
-    if(query){ Pool_pour(&query, new); }
-    if(next_query){ Pool_pour(&next_query, new); }
-    if(next_query){ Pool_pour(&prim_queries, new); }
-    for(size_t i = 0; i < MAX_KEEPS; i++){
-        if(keeps[i]){
-            Pool_pour(&keeps[i], new);
-        }
-    }
+    each_live_all((term_iterator_t)Pool_pour, new);
     Pool_free(*p);
     Pool_expand(new);
     *p = new;
@@ -430,6 +440,7 @@ void gc(Pool** p){
 }
 
 void disable_gc(){
+    SANITY_CHECK;
     gc_disable_count++;
 }
 
@@ -438,6 +449,8 @@ void enable_gc(){
     if(would_gc && gc_disable_count == 0){
         gc(&pool);
         would_gc = false;
+    }else{
+        SANITY_CHECK;
     }
 }
 
@@ -466,6 +479,16 @@ Term** keep(Term* term){
     }
     fatal_error("internal error: not enough keeps");
     UNREACHABLE;
+}
+
+void do_nothing(){ }
+
+void sanity_check_term(Term** term, ...){
+    Term_render(*term, false, do_nothing, NULL);
+}
+
+void sanity_check_all(){
+    each_live_all((term_iterator_t)sanity_check_term, NULL);
 }
 
 void unkeep(Term** term){
@@ -741,7 +764,7 @@ Term* chase(Term* term){
     return term;
 }
 
-string_t atom_string(atom_t atom){
+string_t atom_to_string(atom_t atom){
     static char buf[32];
     Term atom_term;
     atom_term.type = FUNCTOR;
@@ -773,7 +796,7 @@ void Term_render(Term* term, bool show_vars, renderer_t write, void* data){
         if(term->data.var.ref != term){
             Term_render(term->data.var.ref, show_vars, write, data);
         }else{
-            string_t name = atom_string(term->data.var.name);
+            string_t name = atom_to_string(term->data.var.name);
             write(data, name.ptr, name.size);
         }
         break;
@@ -789,7 +812,7 @@ void Term_render(Term* term, bool show_vars, renderer_t write, void* data){
         write(data, "\"", 1);
         break;
     case FUNCTOR: {
-        string_t name = atom_string(term->data.functor.atom);
+        string_t name = atom_to_string(term->data.functor.atom);
         write(data, name.ptr, name.size);
         if(term->data.functor.size){
             write(data, "(", 1);
@@ -1039,6 +1062,7 @@ Term* Term_copy_rec(Term* term, HashTable* vars){
     term = chase(term);
     switch(term->type){
     case INTEGER:
+    case STRING:
         return term;
     case FUNCTOR:{
         functor_size_t size = term->data.functor.size;
@@ -1125,7 +1149,7 @@ bool stack_push(atom_t atom, functor_size_t size, Term* term){
     Term* rules = HashTable_find(globals, Spec(atom, size));
     enable_gc();
     if(!rules){
-        return error("No such predicate '%s'/%u", atom_string(atom).ptr, size);
+        return error("No such predicate '%s'/%u", atom_to_string(atom).ptr, size);
     }
     disable_gc();
     Term* branches = Atom(atom_nil);
@@ -1145,7 +1169,7 @@ bool stack_push(atom_t atom, functor_size_t size, Term* term){
     }
     if(Atom_eq(branches, atom_nil)){
         enable_gc();
-        return error("No rules for predicate '%s/%u'", atom_string(atom), size);
+        return error("No rules for predicate '%s/%u'", atom_to_string(atom), size);
     }
     stack = Functor3(atom_frame, branches, Atom(atom_nil), stack);
     next_query = NULL;
@@ -1200,7 +1224,7 @@ bool stack_next(bool success){
 
 void set_var(Term* a, Term* b){
     D_EVAL{
-        trace_term("unifying %s with", b, atom_string(a->data.var.name));
+        trace_term("unifying %s with", b, atom_to_string(a->data.var.name));
     }
     if(a->type != VAR) fatal_error("Called set_var on non-var");
     if(a->data.var.ref != a) fatal_error("Cannot overwrite variable's value");
@@ -1262,6 +1286,9 @@ integer_t eval_math(Term* expr){
             return eval_math(args[0]) + eval_math(args[1]);
         }
     }
+    case VAR:
+    case MOVED:
+    case STRING:
     default:
         fatal_error("invalid math expression");
         UNREACHABLE;
@@ -1377,7 +1404,7 @@ string_t Term_string(Term* term){
     if(term->type == STRING){
         return term->data.string;
     }else if(term->type == FUNCTOR && term->data.functor.size == 0){
-        return atom_string(term->data.functor.atom);
+        return atom_to_string(term->data.functor.atom);
     }else{
         fatal_error("expected string");
         UNREACHABLE;
@@ -1516,7 +1543,7 @@ bool prim_atom_string(Term** args){
     Term* string = chase(args[1]);
     if(atom->type == FUNCTOR && atom->data.functor.size == 0){
         disable_gc();
-        string_t s = atom_string(args[0]->data.functor.atom);
+        string_t s = atom_to_string(args[0]->data.functor.atom);
         bool ret = unify(string, String(s.ptr, s.size));
         enable_gc();
         return ret;
@@ -1582,6 +1609,10 @@ bool prim_string_concat(Term** args){
     }
 }
 
+bool prim_string(Term** args){
+    return chase(args[0])->type == STRING;
+}
+
 prim_t find_prim(atom_t atom, functor_size_t size){
 
 #define PRIM(f, n, r) \
@@ -1608,6 +1639,7 @@ prim_t find_prim(atom_t atom, functor_size_t size){
     PRIM(atom_string, 2, atom_string);
     PRIM(., 2, cons);
     PRIM(string_concat, 3, string_concat);
+    PRIM(string, 1, string);
 #undef PRIM
 
     return NULL;
@@ -1617,6 +1649,7 @@ bool eval_query(){
     guarantee(!evaluating, "internal error: called eval_query recursively");
     evaluating = true;
     while(true){
+        SANITY_CHECK;
         bool success = true;
         Term* term = chase(query);
         switch(term->type){
@@ -1628,7 +1661,7 @@ bool eval_query(){
             return error("Cannot eval string \"%s\"", term->data.string);
         case VAR:
             evaluating = false;
-            return error("Cannot eval unbound variable '%s'", atom_string(term->data.var.name));
+            return error("Cannot eval unbound variable '%s'", atom_to_string(term->data.var.name));
         case MOVED:
             fatal_error("Cannot eval moved term");
         case FUNCTOR: {
@@ -1913,7 +1946,7 @@ Term* parse_simple_term(char** str, HashTable* vars){
 }
 
 void op_type(integer_t prec, atom_t atom, integer_t *left, integer_t *right){
-    char* spec = atom_string(atom).ptr;
+    char* spec = atom_to_string(atom).ptr;
     char* r = spec + 2;
     switch(spec[0]){
     case 'x': *left = prec; break;
@@ -1973,21 +2006,21 @@ Term* combine_terms(integer_t prec, Term*** terms){
             if(left_prec && !left_term){
                 D_PARSE{
                     debug("missing left operand for '%s' '%s'\n",
-                            atom_string(op_spec).ptr, atom_string(name).ptr);
+                            atom_to_string(op_spec).ptr, atom_to_string(name).ptr);
                 }
                 continue;
             }
             if(left_term && !left_prec){
                 D_PARSE{
                     debug("extra left operand for '%s' '%s'\n",
-                            atom_string(op_spec).ptr, atom_string(name).ptr);
+                            atom_to_string(op_spec).ptr, atom_to_string(name).ptr);
                 }
                 continue;
             }
             if(left_prec > prec){
                 D_PARSE{
                     debug("dropping '%s', too loose (%ld <= %ld)\n",
-                            atom_string(name).ptr, left_prec, prec);
+                            atom_to_string(name).ptr, left_prec, prec);
                 }
                 continue;
             }
@@ -2238,7 +2271,7 @@ void load_prelude(){
 void list_vars(Term* term, HashTable* vars){
     switch(term->type){
     case VAR:
-        if(atom_string(term->data.var.name).ptr[0] == '_') return;
+        if(atom_to_string(term->data.var.name).ptr[0] == '_') return;
         Term** val = HashTable_get(vars, Integer((integer_t)term));
         if(!*val) *val = term;
         break;
@@ -2247,6 +2280,9 @@ void list_vars(Term* term, HashTable* vars){
             list_vars(term->data.functor.args[i], vars);
         }
         break;
+    case MOVED:
+    case INTEGER:
+    case STRING:
     default:
         (void)0;
     }
@@ -2351,7 +2387,7 @@ int main(int argc, char** argv){
     char* arg;
     char* file = NULL;
     char* eval = NULL;
-    char usage[] = "usage: poorlog [FILE] [-e EXPR] [-dparse] [-deval] [-dhashtable] [-dgc] [-datom] [-dprelude]";
+    char usage[] = "usage: poorlog [FILE] [-e EXPR] [-dparse] [-deval] [-dhashtable] [-dnogc] [-datom] [-dprelude] [-dsanity]";
     while(*args){
         arg = *args++;
         if(*arg != '-' || (arg[0] && arg[1] == 0)){
@@ -2375,8 +2411,9 @@ int main(int argc, char** argv){
             if(!strcmp(arg+2, "parse")) debug_parse = true; else
             if(!strcmp(arg+2, "eval")) debug_eval = true; else
             if(!strcmp(arg+2, "hashtable")) debug_hashtable = true; else
-            if(!strcmp(arg+2, "gc")) debug_gc = true; else
+            if(!strcmp(arg+2, "nogc")) debug_gc = false; else
             if(!strcmp(arg+2, "atom")) debug_atom = true; else
+            if(!strcmp(arg+2, "sanity")) debug_sanity = true; else
             if(!strcmp(arg+2, "prelude")) debug_enabled = &always;
             else fatal_error("unknown debug mode: %s", arg+2);
             break;
@@ -2428,6 +2465,7 @@ int main(int argc, char** argv){
     atom_braces = intern_nt("{}");
     atom_library = intern_nt("library");
     atom_string_concat = intern_nt("string_concat");
+    atom_string = intern_nt("string");
 
     stack = Atom(atom_empty);
 
