@@ -13,7 +13,8 @@
 #include <signal.h>
 int kill(pid_t, int);
 
-#define PRELUDE_PATH "boot/lib/prelude.pl"
+#define LIB_PATH "boot/lib"
+#define PRELUDE_PATH LIB_PATH "/prelude.pl"
 
 #define GLOBALS_SIZE 4096
 #define POOL_SECTION_SIZE 4096
@@ -24,6 +25,7 @@ int kill(pid_t, int);
 #define DEFAULT_BUFFER_SIZE 1024
 #define MAX_NO_PAREN_TERMS 1024
 #define MAX_STREAMS 256
+#define MAX_KEEPS 256
 
 #define HASH_INIT 2166136261
 #define HASH_PRIME 16777619
@@ -96,12 +98,15 @@ typedef struct {
 #define MIN(a,b) ((a) < (b) ? a : b)
 #define MAX(a,b) ((a) < (b) ? b : a)
 
+#define BREAKPOINT raise(SIGTRAP)
+
 void trace_term(char* str, Term* term, ...);
 Term* parse_term_vars(char** str, HashTable* vars, char* end_char);
 bool assertz(Term* term);
 Term** HashTable_get(HashTable* table, Term* key);
 Term* HashTable_find(HashTable* table, Term* key);
 void fatal_error(char* format, ...);
+void load_file(char* path);
 
 Pool* pool = NULL;
 HashTable* globals = NULL;
@@ -112,7 +117,8 @@ atom_t next_free_atom;
 Term* stack = NULL;
 Term* query = NULL;
 Term* next_query = NULL;
-Term* keep = NULL;
+Term* prim_queries = NULL;
+Term* keeps[MAX_KEEPS];
 int gc_disable_count = 0;
 int alloc_disable_count = 0;
 bool would_gc = false;
@@ -122,7 +128,7 @@ int free_stream = 0;
 
 atom_t atom_slash, atom_colon, atom_nil, atom_cons, atom_op, atom_entails,
     atom_frame, atom_drop, atom_comma, atom_eq, atom_empty, atom_true,
-    atom_underscore, atom_assertz_dcg, atom_rarrow, atom_braces;
+    atom_underscore, atom_assertz_dcg, atom_rarrow, atom_braces, atom_library;
 
 atom_t atom_is, atom_add;
 
@@ -149,6 +155,7 @@ void* system_alloc(size_t size){
     void* ret = malloc(size);
     if(!ret){
         fprintf(stderr, "fatal error: memory allocation failed: %s\n", strerror(errno));
+        BREAKPOINT;
         exit(1);
     }
     return ret;
@@ -158,6 +165,7 @@ void* system_realloc(void* p, size_t size){
     void* ret = realloc(p, size);
     if(!ret){
         fprintf(stderr, "fatal error: memory allocation failed: %s\n", strerror(errno));
+        BREAKPOINT;
         exit(1);
     }
     return ret;
@@ -174,8 +182,9 @@ void fatal_error(char* format, ...){
     guarantee_errno(res >= 0, "fprintf");
     va_end(argptr);
     if(query){
-	trace_term("while evaluating", query);
+        trace_term("while evaluating", query);
     }
+    BREAKPOINT;
     exit(1);
     UNREACHABLE;
 }
@@ -406,7 +415,12 @@ void gc(Pool** p){
     if(stack){ Pool_pour(&stack, new); }
     if(query){ Pool_pour(&query, new); }
     if(next_query){ Pool_pour(&next_query, new); }
-    if(keep){ Pool_pour(&keep, new);}
+    if(next_query){ Pool_pour(&prim_queries, new); }
+    for(size_t i = 0; i < MAX_KEEPS; i++){
+        if(keeps[i]){
+            Pool_pour(&keeps[i], new);
+        }
+    }
     Pool_free(*p);
     Pool_expand(new);
     *p = new;
@@ -439,6 +453,21 @@ Term* Pool_add_term_gc(Pool** p){
      }
      Term* term = Pool_add_term_expand(*p);
      return term;
+}
+
+Term** keep(Term* term){
+    for(size_t i = 0; i < MAX_KEEPS; i++){
+        if(!keeps[i]){
+            keeps[i] = term;
+            return &keeps[i];
+        }
+    }
+    fatal_error("internal error: not enough keeps");
+    UNREACHABLE;
+}
+
+void unkeep(Term** term){
+    *term = NULL;
 }
 
 Term* Integer(integer_t n){
@@ -1418,7 +1447,7 @@ bool prim_read_string(Term** args){
         free(stream->buf);
         stream->buf = NULL;
         stream->alloc_size = 0;
-        return ret;        
+        return ret;
     }else{
         ssize_t res = read(stream->fd, buf, max);
         if(res == 0){
@@ -1485,6 +1514,30 @@ bool prim_atom_string(Term** args){
     }
 }
 
+bool prim_cons(Term** args){
+    guarantee(Atom_eq(args[1], atom_nil), "load should be a singleton");
+    Term* lib = Functor_get(args[0], atom_library, 1)[0];
+    char *path;
+    disable_gc();
+    if(lib){
+        string_t name = Term_string(lib);
+        size_t sz = sizeof(LIB_PATH) + strlen(name.ptr);
+        path = system_alloc(sz + 4);
+        memcpy(path, LIB_PATH, sizeof(LIB_PATH));
+        path[sizeof(LIB_PATH) - 1] = '/';
+        strcpy(&path[sizeof(LIB_PATH)], name.ptr);
+        strcpy(&path[sz], ".pl");
+    }else{
+        path = Term_string(List_head(args[0])).ptr;
+    }
+    load_file(path);
+    if(lib){
+        free(path);
+    }
+    enable_gc();
+    return true;
+}
+
 prim_t find_prim(atom_t atom, functor_size_t size){
 
 #define PRIM(f, n, r) \
@@ -1511,15 +1564,14 @@ prim_t find_prim(atom_t atom, functor_size_t size){
     PRIM(read_string, 3, read_string);
     PRIM(string_codes, 2, string_codes);
     PRIM(atom_string, 2, atom_string);
+    PRIM(., 2, cons);
 #undef PRIM
 
     return NULL;
 }
 
 bool eval_query(){
-    if(evaluating){
-        fatal_error("internal error: called eval_query recursively");
-    }
+    guarantee(!evaluating, "internal error: called eval_query recursively");
     evaluating = true;
     while(true){
         bool success = true;
@@ -1552,7 +1604,19 @@ bool eval_query(){
             }
             prim_t prim = find_prim(atom, size);
             if(prim){
+                guarantee(!prim_queries, "internal error: prim_queries should be empty");
                 success = prim(args);
+                if(prim_queries){
+                    if(success){
+                        if(next_query == NULL){
+                            next_query = Atom(atom_true);
+                        }
+                        for(Term* list = prim_queries; !Atom_eq(list, atom_nil); list = List_tail(list)){
+                            next_query = Functor2(atom_comma, List_head(list), next_query);
+                        }
+                    }
+                    prim_queries = NULL;
+                }
             }else{
                 if(!stack_push(atom, size, term)){
                     evaluating = false;
@@ -1621,7 +1685,7 @@ Term* parse_args(char **str, atom_t atom, HashTable* vars){
         }else{
             return NULL;
         }
-    } 
+    }
     Term* functor = Functor_unsafe(atom, count);
     for(functor_size_t i = 0; i < count; i++){
         Functor_set_arg(functor, count - i - 1, List_head(list));
@@ -1645,7 +1709,7 @@ Term* parse_atomic(char** str, HashTable* vars){
         if(isupper(*pos) || *pos == '_'){
             var = true;
         }
-        while(isalpha(*pos) || *pos == '_'){ pos++; }
+        while(isalpha(*pos) || isdigit(*pos) || *pos == '_'){ pos++; }
         end = pos;
     }else if(*pos == '\''){
         while(*++pos != '\''){ }
@@ -1765,17 +1829,17 @@ Term* parse_simple_term(char** str, HashTable* vars){
     case '[':
         return parse_list(str, vars);
     case '{':
-	if(*(pos + 1) == '}'){
-	    break;
-	}
-	pos++;
-	Term* inner = parse_term_vars(&pos, vars, "}");
-	if(inner && *pos == '}'){
-	    *str = pos + 1;
-	    return Functor1(atom_braces, inner);
-	}else{
-	    return NULL;
-	}
+        if(*(pos + 1) == '}'){
+            break;
+        }
+        pos++;
+        Term* inner = parse_term_vars(&pos, vars, "}");
+        if(inner && *pos == '}'){
+            *str = pos + 1;
+            return Functor1(atom_braces, inner);
+        }else{
+            return NULL;
+        }
     case '.': {
         char next = *(pos + 1);
         if(isspace(next) || !next) return NULL; }
@@ -1855,7 +1919,7 @@ Term* combine_terms(integer_t prec, Term*** terms){
             integer_t left_prec, right_prec;
             atom_t op_spec = args[1]->data.functor.atom;
             op_type(args[0]->data.integer, op_spec, &left_prec, &right_prec);
-            if(left_prec && !left_term){ 
+            if(left_prec && !left_term){
                 D_PARSE{
                     debug("missing left operand for '%s' '%s'\n",
                             atom_string(op_spec).ptr, atom_string(name).ptr);
@@ -1999,12 +2063,18 @@ Term* parse_toplevel(char* str){
         rest = &(*rest)->data.functor.args[1];
     }
     *rest = Atom(atom_nil);
-    guarantee(!keep, "register variable in use");
-    keep = list;
+    Term** tmp = keep(list);
     enable_gc();
-    list = keep;
-    keep = NULL;
+    list = *tmp;
+    unkeep(tmp);
     return list;
+}
+
+void add_prim_query (Term *query){
+    if(!prim_queries){
+        prim_queries = Atom(atom_nil);
+    }
+    prim_queries = Functor2(atom_cons, query, prim_queries);
 }
 
 bool assertz(Term* term){
@@ -2026,7 +2096,7 @@ bool assertz(Term* term){
     if(args){
         Term* q = Functor1(atom_assertz_dcg, term);
         if(evaluating){
-            next_query = next_query ? Functor2(atom_cons, q, next_query) : q;
+            add_prim_query(q);
         }else{
             query = q;
             return eval_query();
@@ -2045,10 +2115,14 @@ void eval_toplevel(Term* term){
     }
     Term** args = Functor_get(term, atom_entails, 1);
     if(args){
-        query = args[0];
-        if(!eval_query()){
-            trace_term("failed directive", args[0]);
-            exit(1);
+        if(evaluating){
+            add_prim_query(args[0]);
+        }else{
+            query = args[0];
+            if(!eval_query()){
+                trace_term("failed directive", args[0]);
+                exit(1);
+            }
         }
         return;
     }
@@ -2079,15 +2153,12 @@ Term* parse_file(char* path){
 }
 
 void load_file(char* path){
-    guarantee(!keep, "register not empty");
-    keep = parse_file(path);
-    if(!keep){
-        fatal_error("failed to parse file '%s'", path);
+    Term** contents = keep(parse_file(path));
+    guarantee(*contents, "failed to parse file '%s'", path);
+    for(; !Atom_eq(*contents, atom_nil); *contents = List_tail(*contents)){
+        eval_toplevel(List_head(*contents));
     }
-    for(; !Atom_eq(keep, atom_nil); keep = List_tail(keep)){
-        eval_toplevel(List_head(keep));
-    }
-    keep = NULL;
+    unkeep(contents);
 }
 
 void load_prelude(){
@@ -2150,15 +2221,14 @@ Term* vars_of(Term* term){
 }
 
 void eval_interactive(Term* term){
-    guarantee(!keep, "register not empty");
-    keep = vars_of(term);
+    Term** vars = keep(vars_of(term));
     query = term;
     if(eval_query()){
-        if(Atom_eq(keep, atom_nil)){
+        if(Atom_eq(*vars, atom_nil)){
             printf("yep.\n");
         }else{
-            for(; !Atom_eq(keep, atom_nil); keep = List_tail(keep)){
-                Buffer* buffer = Term_show(List_head(keep), false);
+            for(; !Atom_eq(*vars, atom_nil); *vars = List_tail(*vars)){
+                Buffer* buffer = Term_show(List_head(*vars), false);
                 printf("%s.\n", buffer->str);
                 Buffer_free(buffer);
             }
@@ -2166,7 +2236,7 @@ void eval_interactive(Term* term){
     }else{
         printf("nope.\n");
     }
-    keep = NULL;
+    unkeep(vars);
 }
 
 void eval_stdin(char* prompt, void (*eval)(Term*)){
@@ -2250,7 +2320,7 @@ int main(int argc, char** argv){
             printf("%s\n", usage);
             exit(0);
             break;
-        case 'd': 
+        case 'd':
             if(!strcmp(arg+2, "parse")) debug_parse = true; else
             if(!strcmp(arg+2, "eval")) debug_eval = true; else
             if(!strcmp(arg+2, "hashtable")) debug_hashtable = true; else
@@ -2305,6 +2375,7 @@ int main(int argc, char** argv){
     atom_atom_string = intern_nt("atom_string");
     atom_eof = intern_nt("eof");
     atom_braces = intern_nt("{}");
+    atom_library = intern_nt("library");
 
     stack = Atom(atom_empty);
 
