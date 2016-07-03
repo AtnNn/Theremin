@@ -1389,7 +1389,7 @@ bool prim_univ(Term** args){
         enable_gc();
         return ret;
     }else{
-        fatal_error("invalid arguments to '=..'/2");
+        return false;
         UNREACHABLE;
     }
 }
