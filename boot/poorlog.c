@@ -22,7 +22,6 @@ int kill(pid_t, int);
 #define COLLISION_HASHTABLE_SIZE 1024
 #define PARSE_VARS_HASHTABLE_SIZE 1024
 #define OPS_HASHTABLE_SIZE 1024
-#define DEFAULT_BUFFER_SIZE 1024
 #define MAX_NO_PAREN_TERMS 1024
 #define MAX_STREAMS 256
 #define MAX_KEEPS 256
@@ -46,15 +45,16 @@ typedef int64_t integer_t;
 typedef uint64_t atom_t;
 
 typedef struct {
+    size_t alloc_size;
+    size_t end;
     char* ptr;
-    size_t size;
-} string_t;
+} Buffer;
 
 typedef struct Term {
     enum { FUNCTOR, VAR, MOVED, INTEGER, STRING } type;
     union {
         integer_t integer;
-        string_t string;
+        Buffer string;
         struct Term* moved_to;
         struct {
             atom_t atom;
@@ -72,12 +72,6 @@ typedef void (*renderer_t)(void*, char*, size_t);
 typedef void(*term_iterator_t)(Term**, void*);
 typedef bool (*prim_t)(Term**);
 typedef hash_t (*hash_function_t)(Term*);
-
-typedef struct {
-    size_t size;
-    size_t pos;
-    char* str;
-} Buffer;
 
 typedef struct {
     size_t sections;
@@ -259,25 +253,73 @@ Stream* Stream_get(int n){
     return &streams[n];
 }
 
-Buffer* Buffer_new(size_t size){
+Buffer* Buffer_empty(size_t size){
     Buffer* buffer = system_alloc(sizeof(Buffer));
-    buffer->size = size;
-    buffer->pos = 0;
-    buffer->str = system_alloc(size + 1);
-    buffer->str[0] = 0;
-    buffer->str[size] = 0;
+    if(size){
+        buffer->alloc_size = size;
+        buffer->end = 0;
+        buffer->ptr = system_alloc(size + 1);
+        buffer->ptr[0] = 0;
+    }else{
+        buffer->alloc_size = 0;
+        buffer->end = 0;
+        buffer->ptr = "\0";
+    }
     return buffer;
 }
 
-void Buffer_free(Buffer* buffer){
-    free(buffer->str);
-    free(buffer);
+Buffer* Buffer_unsafe(size_t size){
+    Buffer* buffer = Buffer_empty(size);
+    buffer->end = size;
+    buffer->ptr[buffer->end] = 0;
+    return buffer;
 }
 
-void Buffer_resize(Buffer* buffer, size_t size){
-    buffer->str = system_realloc(buffer->str, size + 1);
-    buffer->size = size;
-    buffer->str[size] = 0;
+void Buffer_reserve(Buffer* buffer, size_t size){
+    if(!buffer->alloc_size){
+        buffer->ptr = system_alloc(size + 1);
+        buffer->ptr[0] = 0;
+    }else if(buffer->end > size){
+        return;
+    }else{
+        buffer->ptr = system_realloc(buffer->ptr, size + 1);
+    }
+    buffer->alloc_size = size;
+}
+
+void Buffer_shrink(Buffer* buffer){
+    Buffer_reserve(buffer, buffer->end);
+}
+
+void Buffer_append(Buffer* buffer, char* str, size_t len){
+    if(buffer->end + len >= buffer->alloc_size){
+        Buffer_reserve(buffer, MAX(buffer->alloc_size * 2, buffer->end + len));
+    }
+    memcpy(buffer->ptr + buffer->end, str, len);
+    buffer->end += len;
+    buffer->ptr[buffer->end] = 0;
+}
+
+void Buffer_append_nt(Buffer* buffer, char* str){
+    size_t len = strlen(str);
+    Buffer_append(buffer, str, len);
+}
+
+Buffer* Buffer_new(char* str, size_t size){
+    Buffer* buf = Buffer_empty(0);
+    Buffer_append(buf, str, size);
+    return buf;
+}
+
+Buffer* Buffer_new_nt(char* str){
+    Buffer* buf = Buffer_empty(0);
+    Buffer_append_nt(buf, str);
+    return buf;
+}
+
+void Buffer_free(Buffer* buffer){
+    free(buffer->ptr);
+    free(buffer);
 }
 
 HashTable* HashTable_new(size_t size){
@@ -471,10 +513,13 @@ Term* Pool_add_term_gc(Pool** p){
 }
 
 Term** keep(Term* term){
+    static size_t last_idx = 0;
     for(size_t i = 0; i < MAX_KEEPS; i++){
-        if(!keeps[i]){
-            keeps[i] = term;
-            return &keeps[i];
+        size_t n = (i + last_idx) % MAX_KEEPS;
+        if(!keeps[n]){
+            last_idx = n;
+            keeps[n] = term;
+            return &keeps[n];
         }
     }
     fatal_error("internal error: not enough keeps");
@@ -491,8 +536,10 @@ void sanity_check_all(){
     each_live_all((term_iterator_t)sanity_check_term, NULL);
 }
 
-void unkeep(Term** term){
+Term* unkeep(Term** term){
+    Term* ret = *term;
     *term = NULL;
+    return ret;
 }
 
 Term* Integer(integer_t n){
@@ -502,38 +549,15 @@ Term* Integer(integer_t n){
     return term;
 }
 
-string_t mkstring_nt(char* str){
-    string_t ret;
-    ret.size = strlen(str);
-    ret.ptr = memcpy(system_alloc(ret.size + 1), str, ret.size + 1);
-    return ret;
-}
-
-string_t mkstring(char* str, size_t size){
-    string_t ret;
-    ret.size = size;
-    ret.ptr = memcpy(system_alloc(size + 1), str, size + 1);
-    ret.ptr[size] = 0;
-    return ret;
-}
-
-string_t mkstring_unsafe(size_t size){
-    string_t ret;
-    ret.size = size;
-    ret.ptr = system_alloc(size + 1);
-    ret.ptr[size] = 0;
-    return ret;
-}
-
-int stringcmp(string_t a, string_t b){
-    if(a.size < b.size){
-        return -(int)(b.size - a.size);
-    }else if(a.size > b.size){
-        return a.size - b.size;
+int Buffer_cmp(Buffer* a, Buffer* b){
+    if(a->end < b->end){
+        return -(int)(b->end - a->end);
+    }else if(a->end > b->end){
+        return a->end - b->end;
     }else{
-        for(size_t i = 0; i < a.size; i++){
-            if(a.ptr[i] != b.ptr[i]){
-                return (int)a.ptr[i] - b.ptr[i];
+        for(size_t i = 0; i < a->end; i++){
+            if(a->ptr[i] != b->ptr[i]){
+                return (int)a->ptr[i] - b->ptr[i];
             }
         }
     }
@@ -543,21 +567,32 @@ int stringcmp(string_t a, string_t b){
 Term* String(char* ptr, size_t size){
     Term* term = Pool_add_term_gc(&pool);
     term->type = STRING;
-    term->data.string = mkstring(ptr, size);
+    term->data.string.ptr = NULL;
+    term->data.string.alloc_size = 0;
+    term->data.string.end = 0;
+    Buffer_append(&term->data.string, ptr, size);
     return term;
 }
 
 Term* String_unsafe(size_t size){
     Term* term = Pool_add_term_gc(&pool);
     term->type = STRING;
-    term->data.string = mkstring_unsafe(size);
+    term->data.string.ptr = NULL;
+    term->data.string.alloc_size = 0;
+    term->data.string.end = 0;
+    Buffer_reserve(&term->data.string, size);
+    term->data.string.end = size;
+    term->data.string.ptr[term->data.string.end] = 0;
     return term;
 }
 
 Term* String_nt(char* str){
     Term* term = Pool_add_term_gc(&pool);
     term->type = STRING;
-    term->data.string = mkstring_nt(str);
+    term->data.string.ptr = NULL;
+    term->data.string.alloc_size = 0;
+    term->data.string.end = 0;
+    Buffer_append_nt(&term->data.string, str);
     return term;
 }
 
@@ -643,9 +678,9 @@ hash_t hash_byte(uint8_t c, hash_t hash){
     return (hash ^ c) * HASH_PRIME;
 }
 
-hash_t hash_string(string_t str, hash_t hash){
-    for(size_t i = 0; i < str.size; i++){
-        hash = hash_byte(str.ptr[i], hash);
+hash_t hash_string(Buffer* str, hash_t hash){
+    for(size_t i = 0; i < str->end; i++){
+        hash = hash_byte(str->ptr[i], hash);
     }
     return hash;
 }
@@ -681,7 +716,7 @@ hash_t hash_rec(Term* term, hash_t hash){
         }
         return hash;
     case STRING:
-        return hash_string(term->data.string, hash);
+        return hash_string(&term->data.string, hash);
     case VAR:
         fatal_error("Cannot hash variable '%s'", term->data.var.name);
     case MOVED:
@@ -748,15 +783,6 @@ Term* Spec(atom_t atom, int size){
     enable_gc();
 }
 
-void Buffer_append(Buffer* buffer, char* str){
-    size_t len = strlen(str);
-    if(buffer->pos + len >= buffer->size){
-        Buffer_resize(buffer, MAX(buffer->size * 2, buffer->pos + len));
-    }
-    strcpy(buffer->str + buffer->pos, str);
-    buffer->pos += len;
-}
-
 Term* chase(Term* term){
     while(term->type == VAR && term->data.var.ref != term){
         term = term->data.var.ref;
@@ -764,20 +790,20 @@ Term* chase(Term* term){
     return term;
 }
 
-string_t atom_to_string(atom_t atom){
-    static char buf[32];
+Term* atom_to_String(atom_t atom){
     Term atom_term;
     atom_term.type = FUNCTOR;
     atom_term.data.functor.atom = atom;
     atom_term.data.functor.size = 0;
     atom_term.data.functor.args = NULL;
     Term* term = HashTable_find(atom_names, &atom_term);
-    if(!term){
-        int n = snprintf(buf, sizeof(buf), "#atom%lu", atom);
-        return String(buf, n)->data.string;
-    }
-    if(term->type != STRING) fatal_error("atom names table contains non-string");
-    return term->data.string;
+    guarantee(term, "unknown atom %d", atom);
+    guarantee(term->type == STRING, "internal error: atom names table contains non-string");
+    return term;
+}
+
+Buffer* atom_to_string(atom_t atom){
+    return &atom_to_String(atom)->data.string;
 }
 
 void Term_render(Term* term, bool show_vars, renderer_t write, void* data){
@@ -796,8 +822,8 @@ void Term_render(Term* term, bool show_vars, renderer_t write, void* data){
         if(term->data.var.ref != term){
             Term_render(term->data.var.ref, show_vars, write, data);
         }else{
-            string_t name = atom_to_string(term->data.var.name);
-            write(data, name.ptr, name.size);
+            Buffer* name = atom_to_string(term->data.var.name);
+            write(data, name->ptr, name->end);
         }
         break;
     case INTEGER: {
@@ -808,12 +834,12 @@ void Term_render(Term* term, bool show_vars, renderer_t write, void* data){
     }
     case STRING:
         write(data, "\"", 1);
-        write(data, term->data.string.ptr, term->data.string.size);
+        write(data, term->data.string.ptr, term->data.string.end);
         write(data, "\"", 1);
         break;
     case FUNCTOR: {
-        string_t name = atom_to_string(term->data.functor.atom);
-        write(data, name.ptr, name.size);
+        Buffer* name = atom_to_string(term->data.functor.atom);
+        write(data, name->ptr, name->end);
         if(term->data.functor.size){
             write(data, "(", 1);
             for(int i = 0; i < term->data.functor.size; i++){
@@ -831,9 +857,9 @@ void Term_render(Term* term, bool show_vars, renderer_t write, void* data){
 }
 
 Buffer* Term_show(Term* term, bool show_vars){
-    Buffer* buffer = Buffer_new(DEFAULT_BUFFER_SIZE);
+    Buffer* buffer = Buffer_empty(0);
     Term_render(term, show_vars, (renderer_t)Buffer_append, buffer);
-    Buffer_resize(buffer, buffer->pos + 1);
+    Buffer_shrink(buffer);
     return buffer;
 }
 
@@ -869,7 +895,7 @@ void trace_term(char* format, Term* term, ...){
     va_start(argptr, term);
     vfprintf(stderr, format, argptr);
     Buffer* buffer = Term_show(term, true);
-    debug(": %s\n", short_snippet(buffer->str, buf, sizeof buf));
+    debug(": %s\n", short_snippet(buffer->ptr, buf, sizeof buf));
     Buffer_free(buffer);
     va_end(argptr);
     alloc_disable_count--;
@@ -937,7 +963,7 @@ bool Term_exact_eq(Term* a, Term* b){
     case INTEGER:
         return a->data.integer == b->data.integer;
     case STRING:
-        return !stringcmp(a->data.string, b->data.string);
+        return !Buffer_cmp(&a->data.string, &b->data.string);
     case FUNCTOR:
         if(a->data.functor.atom != b->data.functor.atom){
             return false;
@@ -1149,7 +1175,7 @@ bool stack_push(atom_t atom, functor_size_t size, Term* term){
     Term* rules = HashTable_find(globals, Spec(atom, size));
     enable_gc();
     if(!rules){
-        return error("No such predicate '%s'/%u", atom_to_string(atom).ptr, size);
+        return error("No such predicate '%s'/%u", atom_to_string(atom)->ptr, size);
     }
     disable_gc();
     Term* branches = Atom(atom_nil);
@@ -1250,7 +1276,7 @@ bool unify(Term* a, Term* b){
     case INTEGER:
         return a->data.integer == b->data.integer;
     case STRING:
-        return !stringcmp(a->data.string, b->data.string);
+        return !Buffer_cmp(&a->data.string, &b->data.string);
     case FUNCTOR:
         if(a->data.functor.atom != b->data.functor.atom){
             return false;
@@ -1399,16 +1425,49 @@ bool process_create(char* path, char** args, int* in, int* out, int* err, int* p
     }
 }
 
-string_t Term_string(Term* term){
+void List_as_string_concat_into(Term* term, Buffer* buf){
+    for(; !Atom_eq(term, atom_nil); term = List_tail(term)){
+        Term* part = List_head(term);
+        switch(part->type){
+        case STRING:
+            Buffer_append(buf, part->data.string.ptr, part->data.string.end);
+            break;
+        case FUNCTOR:
+            guarantee(part->data.functor.size == 0, "non-empty functor in string");
+            Buffer* b = atom_to_string(part->data.functor.atom);
+            Buffer_append(buf, b->ptr, b->end);
+            break;
+        case INTEGER: {
+            char c = part->data.integer;
+            Buffer_append(buf, &c, 1);
+            break;
+        }
+        case MOVED:
+        case VAR:
+        default:
+            fatal_error("invalid string");
+            UNREACHABLE;
+        }
+    }
+}
+
+Term* Term_String(Term* term){
     term = chase(term);
     if(term->type == STRING){
-        return term->data.string;
-    }else if(term->type == FUNCTOR && term->data.functor.size == 0){
-        return atom_to_string(term->data.functor.atom);
+        return term;
+    }else if(Atom_eq(term, atom_nil)){
+        return String("",0);
+    }else if(is_Atom(term)){
+        return atom_to_String(term->data.functor.atom);
     }else{
-        fatal_error("expected string");
-        UNREACHABLE;
+        Term* str = String_unsafe(0);
+        List_as_string_concat_into(term, &str->data.string);
+        return str;
     }
+}
+
+Buffer* Term_string(Term* term){
+    return &Term_String(chase(term))->data.string;
 }
 
 integer_t Term_integer(Term* term){
@@ -1421,7 +1480,7 @@ integer_t Term_integer(Term* term){
 
 bool prim_process_create(Term** args){
     disable_gc();
-    char* command_path = Term_string(args[0]).ptr;
+    char* command_path = Term_string(args[0])->ptr;
     char* command_args[256];
     command_args[0] = command_path;
     size_t n = 1;
@@ -1429,7 +1488,7 @@ bool prim_process_create(Term** args){
         if(n >= sizeof(command_args) - 1){
             fatal_error("too many arguments for process");
         }
-        command_args[n] = Term_string(List_head(list)).ptr;
+        command_args[n] = Term_string(List_head(list))->ptr;
         n++;
     }
     command_args[n] = NULL;
@@ -1465,8 +1524,8 @@ bool prim_close(Term** args){
 
 bool prim_write_string(Term** args){
     int stream = Term_integer(args[0]);
-    string_t str = Term_string(args[1]);
-    ssize_t res = write(streams[stream].fd, str.ptr, str.size);
+    Buffer* str = Term_string(args[1]);
+    ssize_t res = write(streams[stream].fd, str->ptr, str->end);
     if(res >= 0){
         return true;
     }else{
@@ -1510,11 +1569,8 @@ bool prim_string_codes(Term** args){
 
     if(string->type == VAR){
         disable_gc();
-        Term* term = Pool_add_term_gc(&pool);
-        term->type = STRING;
         size_t size = List_length(codes);
-        term->data.string.size = size;
-        term->data.string.ptr = system_alloc(size);
+        Term* term = String_unsafe(size);
         size_t n = 0;
         for(Term* list = codes; !Atom_eq(list, atom_nil); list = List_tail(list)){
             term->data.string.ptr[n++] = Term_integer(List_head(list));
@@ -1524,11 +1580,11 @@ bool prim_string_codes(Term** args){
         return ret;
     }else{
         disable_gc();
-        string_t s = Term_string(string);
+        Buffer* s = Term_string(string);
         Term* root = NULL;
         Term** list = &root;
-        for(size_t i = 0; i < s.size; i++){
-            *list = Functor2(atom_cons, Integer(s.ptr[i]), NULL);
+        for(size_t i = 0; i < s->end; i++){
+            *list = Functor2(atom_cons, Integer(s->ptr[i]), NULL);
             list = &(*list)->data.functor.args[1];
         }
         *list = Atom(atom_nil);
@@ -1541,10 +1597,10 @@ bool prim_string_codes(Term** args){
 bool prim_atom_string(Term** args){
     Term* atom = chase(args[0]);
     Term* string = chase(args[1]);
-    if(atom->type == FUNCTOR && atom->data.functor.size == 0){
+    if(is_Atom(atom)){
         disable_gc();
-        string_t s = atom_to_string(args[0]->data.functor.atom);
-        bool ret = unify(string, String(s.ptr, s.size));
+        Buffer* s = atom_to_string(atom->data.functor.atom);
+        bool ret = unify(string, String(s->ptr, s->end));
         enable_gc();
         return ret;
     }else if(string->type == STRING){
@@ -1564,15 +1620,15 @@ bool prim_cons(Term** args){
     char *path;
     disable_gc();
     if(lib){
-        string_t name = Term_string(lib);
-        size_t sz = sizeof(LIB_PATH) + strlen(name.ptr);
+        Buffer* name = Term_string(lib);
+        size_t sz = sizeof(LIB_PATH) + strlen(name->ptr);
         path = system_alloc(sz + 4);
         memcpy(path, LIB_PATH, sizeof(LIB_PATH));
         path[sizeof(LIB_PATH) - 1] = '/';
-        strcpy(&path[sizeof(LIB_PATH)], name.ptr);
+        strcpy(&path[sizeof(LIB_PATH)], name->ptr);
         strcpy(&path[sz], ".pl");
     }else{
-        path = Term_string(List_head(args[0])).ptr;
+        path = Term_string(List_head(args[0]))->ptr;
     }
     load_file(path);
     if(lib){
@@ -1582,29 +1638,176 @@ bool prim_cons(Term** args){
     return true;
 }
 
+Term* Var_push(Term* var, Term* term){
+    Term** ret = keep(Var(atom_underscore));
+    bool ok = unify(var, Functor2(atom_cons, term, *ret));
+    guarantee(ok, "internal error: failed to unify");
+    return unkeep(ret);
+}
+
+Term* String_concat(Term* a, Term* b){
+    a = chase(a);
+    b = chase(b);
+    if(Atom_eq(a, atom_nil)){
+        return b;
+    }
+    if(a->type == STRING || is_Atom(a)){
+        return Functor2(atom_cons, a, b);
+    }
+    Term** tail = keep(Var(atom_underscore));
+    Term** out = keep(*tail);
+    while(true){
+        Term** args = Functor_get(a, atom_cons, 2);
+        Term* head = chase(args[0]);
+        if(args){
+            if(head->type == INTEGER ||
+               head->type == STRING ||
+               is_Atom(head)){
+                *tail = Var_push(*tail, head);
+            }else{
+                fatal_error("invalid string");
+            }
+            a = chase(args[1]);
+        }else if(Atom_eq(a, atom_nil)){
+            break;
+        }else if(a->type == STRING || is_Atom(a)){
+            *tail = Var_push(*tail, a);
+            break;
+        }else{
+            fatal_error("invalid string");
+        }
+    }
+    bool ok = unify(b, *tail);
+    guarantee(ok, "internal error: failed to unify string");
+    unkeep(tail);
+    return unkeep(out);
+}
+
+bool String_next_char(Term** str, size_t* n, char* out){
+    if(Atom_eq(*str, atom_nil)){
+        *str = NULL;
+        return false;
+    }
+    Buffer* buf = NULL;
+    if((*str)->type == STRING){
+        buf = &(*str)->data.string;
+    }else if(is_Atom(*str)){
+        buf = atom_to_string((*str)->data.functor.atom);
+    }
+    if(buf){
+        if(*n < buf->end){
+            *out = buf->ptr[*n];
+            (*n)++;
+            return true;
+        }else{
+            *str = NULL;
+            return false;
+        }
+    }
+    Term** args = Functor_get(*str, atom_cons, 2);
+    Term* head = chase(args[0]);
+    if(Atom_eq(head, atom_nil)){
+        if(*n == 0){
+            *out = '[';
+            *n = 1;
+            return true;
+        }else{
+            *out = ']';
+            *n = 0;
+            *str = args[1];
+            return true;
+        }
+    }
+    if(head->type == STRING || is_Atom(head)){
+        Term* tmp = head;
+        bool res = String_next_char(&tmp, n, out);
+        if(res){
+            return true;
+        }else{
+            *n = 0;
+            *str = chase(args[1]);
+            return String_next_char(str, n, out);
+        }
+    }
+    if(head->type == INTEGER){
+        *str = chase(args[1]);
+        *out = head->data.integer;
+        return true;
+    }
+    fatal_error("invalid string");
+    UNREACHABLE;
+}
+
+Term* String_after(Term* str, size_t n){
+    if(n == 0){
+        return str;
+    }
+    if(str->type == STRING || is_Atom(str)){
+        Buffer* buf = Term_string(str);
+        guarantee(buf->end < n, "internal error: string too short");
+        return String(&buf->ptr[n], buf->end - n);
+    }
+    Term** args = Functor_get(str, atom_cons, 2);
+    Term* head = chase(args[0]);
+    if(head->type == STRING || is_Atom(head)){
+        Term** part = keep(String_after(head, n));
+        Term* ret = Functor2(atom_cons, *part, args[1]);
+        unkeep(part);
+        return ret;
+    }
+    fatal_error("internal error: invalid string");
+    UNREACHABLE;
+}
+
+bool unify_strings(Term* a, Term* b){
+    size_t an = 0;
+    size_t bn = 0;
+    a = chase(a);
+    b = chase(b);
+    while(true){
+        if(a->type == VAR){
+            Term** rest = keep(String_after(b, bn));
+            bool ret = unify(a, *rest);
+            unkeep(rest);
+            return ret;
+        }else if(b->type == VAR){
+            Term** rest = keep(String_after(a, an));
+            bool ret = unify(b, *rest);
+            unkeep(rest);
+            return ret;
+        }else{
+            char ac;
+            char bc;
+            bool aeos = String_next_char(&a, &an, &ac);
+            bool beos = String_next_char(&b, &bn, &bc);
+            if(aeos != beos || ac != bc){
+                return false;
+            }
+            if(aeos || beos){
+                return true;
+            }
+        }
+    }
+}
+
 bool prim_string_concat(Term** args){
-    if(args[0]->type == VAR){
-        string_t b = Term_string(args[1]);
-        string_t c = Term_string(args[2]);
-        if(b.size > c.size || memcmp(b.ptr, &c.ptr[c.size - b.size], b.size)){
+    Term* ta = chase(args[0]);
+    Term* tb = chase(args[1]);
+    Term* tc = chase(args[2]);
+    if(ta->type == VAR){
+        Buffer* b = Term_string(tb);
+        Buffer* c = Term_string(tc);
+        if(b->end > c->end || memcmp(b->ptr, &c->ptr[c->end - b->end], b->end)){
             return false;
         }
-        return unify(args[0], String(c.ptr, c.size - b.size));
-    }else if(args[1]->type == VAR){
-        string_t a = Term_string(args[0]);
-        string_t c = Term_string(args[2]);
-        if(a.size > c.size || memcmp(a.ptr, c.ptr, a.size)){
-            return false;
-        }
-        return unify(args[1], String(&c.ptr[a.size], c.size - a.size));
+        disable_gc();
+        bool ret =  unify_strings(ta, String(c->ptr, c->end - b->end));
+        enable_gc();
+        return ret;
     }else{
-        string_t a = Term_string(args[0]);
-        string_t b = Term_string(args[1]);
-        Term** c = keep(String_unsafe(a.size + b.size));
-        memcpy((*c)->data.string.ptr, a.ptr, a.size);
-        memcpy((*c)->data.string.ptr + a.size, b.ptr, b.size);
-        bool ret = unify(args[2], *c);
-        unkeep(c);
+        Term** tab = keep(String_concat(ta, tb));
+        bool ret = unify_strings(tc, *tab);
+        unkeep(tab);
         return ret;
     }
 }
@@ -1934,7 +2137,7 @@ Term* parse_simple_term(char** str, HashTable* vars){
         *str = pos;
         return atom;
     }
-    if(atom->type == FUNCTOR && atom->data.functor.size == 0){
+    if(is_Atom(atom)){
         Term* functor = parse_args(&pos, atom->data.functor.atom, vars);
         if(functor){
             *str = pos;
@@ -1946,7 +2149,7 @@ Term* parse_simple_term(char** str, HashTable* vars){
 }
 
 void op_type(integer_t prec, atom_t atom, integer_t *left, integer_t *right){
-    char* spec = atom_to_string(atom).ptr;
+    char* spec = atom_to_string(atom)->ptr;
     char* r = spec + 2;
     switch(spec[0]){
     case 'x': *left = prec; break;
@@ -2006,21 +2209,21 @@ Term* combine_terms(integer_t prec, Term*** terms){
             if(left_prec && !left_term){
                 D_PARSE{
                     debug("missing left operand for '%s' '%s'\n",
-                            atom_to_string(op_spec).ptr, atom_to_string(name).ptr);
+                            atom_to_string(op_spec)->ptr, atom_to_string(name)->ptr);
                 }
                 continue;
             }
             if(left_term && !left_prec){
                 D_PARSE{
                     debug("extra left operand for '%s' '%s'\n",
-                            atom_to_string(op_spec).ptr, atom_to_string(name).ptr);
+                            atom_to_string(op_spec)->ptr, atom_to_string(name)->ptr);
                 }
                 continue;
             }
             if(left_prec > prec){
                 D_PARSE{
                     debug("dropping '%s', too loose (%ld <= %ld)\n",
-                            atom_to_string(name).ptr, left_prec, prec);
+                            atom_to_string(name)->ptr, left_prec, prec);
                 }
                 continue;
             }
@@ -2225,11 +2428,11 @@ Term* parse_file(char* path){
     long size = ftell(fp); guarantee_errno(size >= 0, "ftell");
     res = fseek(fp, 0, SEEK_SET); guarantee_errno(res >= 0, "fseek");
 
-    Buffer* data = Buffer_new(size);
-    size_t res_size = fread(data->str, size, 1, fp); guarantee(res_size == 1, "fread failed");
+    Buffer* data = Buffer_unsafe(size);
+    size_t res_size = fread(data->ptr, size, 1, fp); guarantee(res_size == 1, "fread failed");
     res = fclose(fp); guarantee(res >= 0, "fclose");
 
-    Term* list = parse_toplevel(data->str);
+    Term* list = parse_toplevel(data->ptr);
 
     Buffer_free(data);
 
@@ -2271,7 +2474,7 @@ void load_prelude(){
 void list_vars(Term* term, HashTable* vars){
     switch(term->type){
     case VAR:
-        if(atom_to_string(term->data.var.name).ptr[0] == '_') return;
+        if(atom_to_string(term->data.var.name)->ptr[0] == '_') return;
         Term** val = HashTable_get(vars, Integer((integer_t)term));
         if(!*val) *val = term;
         break;
@@ -2316,7 +2519,7 @@ void eval_interactive(Term* term){
         }else{
             for(; !Atom_eq(*vars, atom_nil); *vars = List_tail(*vars)){
                 Buffer* buffer = Term_show(List_head(*vars), false);
-                printf("%s.\n", buffer->str);
+                printf("%s.\n", buffer->ptr);
                 Buffer_free(buffer);
             }
         }
@@ -2327,33 +2530,33 @@ void eval_interactive(Term* term){
 }
 
 void eval_stdin(char* prompt, void (*eval)(Term*)){
-    Buffer* buffer = Buffer_new(4096);
+    Buffer* buffer = Buffer_empty(4096);
     bool term = isatty(0);
     if(term){
         printf("%s", prompt);
         fflush(stdout);
     }
     while(true){
-        if(buffer->size == buffer->pos){
-            Buffer_resize(buffer, buffer->size * 2);
+        if(buffer->end == buffer->alloc_size){
+            Buffer_reserve(buffer, buffer->alloc_size * 2);
         }
-        ssize_t n = read(0, buffer->str + buffer->pos, buffer->size - buffer->pos);
+        ssize_t n = read(0, buffer->ptr + buffer->end, buffer->alloc_size - buffer->end);
         if(n < 0){
             fatal_error("read error: %s", strerror(errno));
         }
         if(!n){
-            if(buffer->pos){
-                fatal_error("could not parse: %s", buffer->str);
+            if(buffer->end){
+                fatal_error("could not parse: %s", buffer->ptr);
             }
             if(term){
                 printf("\n");
             }
             return;
         }
-        buffer->pos += n;
-        buffer->str[buffer->pos] = 0;
+        buffer->end += n;
+        buffer->ptr[buffer->end] = 0;
 
-        char* pos = buffer->str;
+        char* pos = buffer->ptr;
         char* next = NULL;
         while(true){
             Term* term = parse_term_partial(&pos);
@@ -2374,9 +2577,9 @@ void eval_stdin(char* prompt, void (*eval)(Term*)){
             }
         }
         if(next){
-            size_t remaining = buffer->pos - (next - buffer->str);
-            memmove(buffer->str, next, remaining + 1);
-            buffer->pos = remaining;
+            size_t remaining = buffer->end - (next - buffer->ptr);
+            memmove(buffer->ptr, next, remaining + 1);
+            buffer->end = remaining;
         }
     }
 }
