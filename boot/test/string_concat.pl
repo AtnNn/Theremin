@@ -6,4 +6,4 @@
 
 a --> "foo", "bar"; "baz".
 
-:- a(X, ""), print(X), nl, fail.
+:- a(X, ""), print(X), nl, fail; true.

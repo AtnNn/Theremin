@@ -36,6 +36,7 @@ int kill(pid_t, int);
 #define D_GC if(debug_gc && *debug_enabled)
 #define D_HASHTABLE if(debug_hashtable && *debug_enabled)
 #define D_ATOM if(debug_atom && *debug_enabled)
+#define D_STRING if(debug_string && *debug_enabled)
 
 #define SANITY_CHECK do{ if(debug_sanity && *debug_enabled){ sanity_check_all(); } }while(0)
 
@@ -145,6 +146,7 @@ bool debug_gc = true;
 bool debug_atom = false;
 bool debug_parse = false;
 bool debug_sanity = false;
+bool debug_string = false;
 bool* debug_enabled = &prelude_loaded;
 bool always = true;
 bool evaluating = false;
@@ -1646,12 +1648,18 @@ Term* Var_push(Term* var, Term* term){
 }
 
 Term* String_concat(Term* a, Term* b){
+    D_STRING{
+        trace_term("concat a", a);
+        trace_term("concat b", b);
+    }
     a = chase(a);
     b = chase(b);
     if(Atom_eq(a, atom_nil)){
+        D_STRING{ debug("concat ret b"); }
         return b;
     }
     if(a->type == STRING || is_Atom(a)){
+        D_STRING{ debug("concat ret cons(a,b)\n"); }
         return Functor2(atom_cons, a, b);
     }
     Term** tail = keep(Var(atom_underscore));
@@ -1680,10 +1688,14 @@ Term* String_concat(Term* a, Term* b){
     bool ok = unify(b, *tail);
     guarantee(ok, "internal error: failed to unify string");
     unkeep(tail);
+    D_STRING{ trace_term("concat ret", *out); }
     return unkeep(out);
 }
 
 bool String_next_char(Term** str, size_t* n, char* out){
+    if((*str)->type == VAR){
+        return false;
+    }
     if(Atom_eq(*str, atom_nil)){
         *str = NULL;
         return false;
@@ -1705,6 +1717,9 @@ bool String_next_char(Term** str, size_t* n, char* out){
         }
     }
     Term** args = Functor_get(*str, atom_cons, 2);
+    if(!args){
+        fatal_error("invalid string");
+    }
     Term* head = chase(args[0]);
     if(Atom_eq(head, atom_nil)){
         if(*n == 0){
@@ -1744,7 +1759,7 @@ Term* String_after(Term* str, size_t n){
     }
     if(str->type == STRING || is_Atom(str)){
         Buffer* buf = Term_string(str);
-        guarantee(buf->end < n, "internal error: string too short");
+        guarantee(buf->end >= n, "internal error: string too short");
         return String(&buf->ptr[n], buf->end - n);
     }
     Term** args = Functor_get(str, atom_cons, 2);
@@ -1760,32 +1775,47 @@ Term* String_after(Term* str, size_t n){
 }
 
 bool unify_strings(Term* a, Term* b){
+    D_STRING{
+        trace_term("unify a", a);
+        trace_term("unify b", b);
+    }
     size_t an = 0;
     size_t bn = 0;
     a = chase(a);
     b = chase(b);
     while(true){
-        if(a->type == VAR){
+        char ac;
+        char bc;
+        Term* prev_a = a;
+        size_t prev_an = an;
+        bool aeos = !String_next_char(&a, &an, &ac);
+        if(aeos && a && a->type == VAR){
             Term** rest = keep(String_after(b, bn));
+            D_STRING{ trace_term("partial b", *rest); }
             bool ret = unify(a, *rest);
             unkeep(rest);
             return ret;
-        }else if(b->type == VAR){
-            Term** rest = keep(String_after(a, an));
+        }
+        bool beos = !String_next_char(&b, &bn, &bc);
+        if(beos && b && b->type == VAR){
+            Term** rest = keep(String_after(prev_a, prev_an));
+            D_STRING{ trace_term("partial a", *rest); }
             bool ret = unify(b, *rest);
             unkeep(rest);
             return ret;
-        }else{
-            char ac;
-            char bc;
-            bool aeos = String_next_char(&a, &an, &ac);
-            bool beos = String_next_char(&b, &bn, &bc);
-            if(aeos != beos || ac != bc){
-                return false;
-            }
-            if(aeos || beos){
-                return true;
-            }
+        }
+        D_STRING{
+            debug("next: eos (%d %d), c (%d %d), n (%zu %zu)\n", aeos, beos, ac, bc, an, bn);
+            trace_term("next a", a);
+            trace_term("next b", b);
+        }
+        if(aeos != beos || ac != bc){
+            D_STRING{ debug("unify failed\n"); }
+            return false;
+        }
+        if(aeos || beos){
+            D_STRING{ debug("unify same\n"); }
+            return true;
         }
     }
 }
@@ -1806,6 +1836,7 @@ bool prim_string_concat(Term** args){
         return ret;
     }else{
         Term** tab = keep(String_concat(ta, tb));
+        D_STRING{ trace_term("concat res", *tab); }
         bool ret = unify_strings(tc, *tab);
         unkeep(tab);
         return ret;
@@ -2617,6 +2648,7 @@ int main(int argc, char** argv){
             if(!strcmp(arg+2, "nogc")) debug_gc = false; else
             if(!strcmp(arg+2, "atom")) debug_atom = true; else
             if(!strcmp(arg+2, "sanity")) debug_sanity = true; else
+            if(!strcmp(arg+2, "string")) debug_string = true; else
             if(!strcmp(arg+2, "prelude")) debug_enabled = &always;
             else fatal_error("unknown debug mode: %s", arg+2);
             break;
