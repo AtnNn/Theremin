@@ -72,7 +72,7 @@ typedef struct Term {
             atom_t name;
             struct Term* ref;
         } var;
-        struct HashTable* map;
+        struct HashTable* dict;
     } data;
 } Term;
 
@@ -119,16 +119,20 @@ void enable_gc();
 bool is_Atom(Term* term);
 
 Pool* pool = NULL;
-HashTable* globals = NULL;
-HashTable* ops = NULL;
-HashTable* interned = NULL;
-HashTable* atom_names = NULL;
+
+struct roots_t {
+    HashTable* globals;
+    HashTable* ops;
+    HashTable* interned;
+    HashTable* atom_names;
+    Term* stack;
+    Term* query;
+    Term* next_query;
+    Term* prim_queries;
+    Term* keeps[MAX_KEEPS];
+} root;
+
 atom_t next_free_atom;
-Term* stack = NULL;
-Term* query = NULL;
-Term* next_query = NULL;
-Term* prim_queries = NULL;
-Term* keeps[MAX_KEEPS];
 int gc_disable_count = 0;
 bool would_gc = false;
 bool base_loaded = false;
@@ -194,8 +198,8 @@ void fatal_error(char* format, ...){
     res = fprintf(stderr, "\n");
     guarantee_errno(res >= 0, "fprintf");
     va_end(argptr);
-    if(query){
-        trace_term("while evaluating", query);
+    if(root.query){
+        trace_term("while evaluating", root.query);
     }
     BREAKPOINT;
     exit(1);
@@ -393,7 +397,7 @@ void Term_destroy(Term* term){
         free(term->data.string.ptr);
         break;
     case DICT:
-        HashTable_free(term->data.map);
+        HashTable_free(term->data.dict);
         break;
     }
 }
@@ -470,17 +474,17 @@ void each_live_table(HashTable* table, term_iterator_t f, void* data){
 }
 
 void each_live_all(term_iterator_t f, void* data){
-    each_live_table(globals, f, data);
-    each_live_table(ops, f, data);
-    each_live_table(interned, f, data);
-    each_live_table(atom_names, f, data);
-    if(stack){ f(&stack, data); }
-    if(query){ f(&query, data); }
-    if(next_query){ f(&next_query, data); }
-    if(next_query){ f(&prim_queries, data); }
+    each_live_table(root.globals, f, data);
+    each_live_table(root.ops, f, data);
+    each_live_table(root.interned, f, data);
+    each_live_table(root.atom_names, f, data);
+    if(root.stack){ f(&root.stack, data); }
+    if(root.query){ f(&root.query, data); }
+    if(root.next_query){ f(&root.next_query, data); }
+    if(root.next_query){ f(&root.prim_queries, data); }
     for(size_t i = 0; i < MAX_KEEPS; i++){
-        if(keeps[i]){
-            f(&keeps[i], data);
+        if(root.keeps[i]){
+            f(&root.keeps[i], data);
         }
     }
 }
@@ -522,11 +526,11 @@ Term** keep(Term* term){
     static size_t last_idx = 0;
     for(size_t i = 0; i < MAX_KEEPS; i++){
         size_t n = (i + last_idx) % MAX_KEEPS;
-        if(!keeps[n]){
+        if(!root.keeps[n]){
             last_idx = n;
-            keeps[n] = term;
+            root.keeps[n] = term;
             SANITY_CHECK;
-            return &keeps[n];
+            return &root.keeps[n];
         }
     }
     fatal_error("internal error: not enough keeps");
@@ -744,7 +748,7 @@ hash_t hash(Term* term){
 }
 
 atom_t intern(Term* str){
-    Term** term = HashTable_get(interned, str);
+    Term** term = HashTable_get(root.interned, str);
     if(*term){
         if(!is_Atom(*term)){
             fatal_error("interned term is not an atom");
@@ -756,7 +760,7 @@ atom_t intern(Term* str){
     }
     atom_t atom = next_free_atom++;
     *term = Atom(atom);
-    Term** rev = HashTable_get(atom_names, *term);
+    Term** rev = HashTable_get(root.atom_names, *term);
     *rev = str;
     D_ATOM{
         debug("interning %s as %lu\n", str->data.string.ptr, atom);
@@ -773,12 +777,12 @@ atom_t intern_nt(char* string){
 
 void intern_prim(char* string, atom_t atom){
     Term** str = keep(String_nt(string));
-    Term** term = HashTable_get(interned, *str);
+    Term** term = HashTable_get(root.interned, *str);
     if(*term){
         fatal_error("prim '%s' already exists", string);
     }
     *term = Atom(atom);
-    Term** rev = HashTable_get(atom_names, *term);
+    Term** rev = HashTable_get(root.atom_names, *term);
     *rev = *str;
     unkeep(str);
     D_ATOM{
@@ -808,7 +812,7 @@ Term* atom_to_String(atom_t atom){
     atom_term.data.functor.atom = atom;
     atom_term.data.functor.size = 0;
     atom_term.data.functor.args = NULL;
-    Term* term = HashTable_find(atom_names, &atom_term);
+    Term* term = HashTable_find(root.atom_names, &atom_term);
     if(!term){
         char buf[20];
         snprintf(buf, 20, "?atom_%lu?", atom);
@@ -1095,7 +1099,7 @@ bool prim_true(){
 }
 
 bool prim_op(Term** args){
-    HashTable_append(ops, args[2], Functor3(atom_op, args[0], args[1], args[2]));
+    HashTable_append(root.ops, args[2], Functor3(atom_op, args[0], args[1], args[2]));
     return true;
 }
 
@@ -1135,12 +1139,17 @@ void HashTable_reset(HashTable* table){
     memset(table->table, 0, sizeof(Term*) * table->size);
 }
 
+Term* Map(size_t size){
+    Term* term = Pool_add_term_gc(&pool);
+    term->type = DICT;
+    term->data.dict = HashTable_new(size);
+    return term;
+}
+
 Term* Term_copy(Term* term){
-    HashTable* vars = HashTable_new(COLLISION_HASHTABLE_SIZE);
-    disable_gc();
-    Term* copy = Term_copy_rec(term, vars);
-    enable_gc();
-    HashTable_free(vars);
+    Term** vars = keep(Map(COLLISION_HASHTABLE_SIZE));
+    Term* copy = Term_copy_rec(term, (*vars)->data.dict);
+    unkeep(vars);
     return copy;
 }
 
@@ -1158,7 +1167,7 @@ bool Rule_spec(Term* term, atom_t* atom, int* size){
 }
 
 void add_undo_var(Term* var){
-    Term** args = Functor_get(stack, atom_frame, 3);
+    Term** args = Functor_get(root.stack, atom_frame, 3);
     if(!args) return;
     Term** undo_vars = &args[1];
     if(!Atom_eq(*undo_vars, atom_drop)){
@@ -1168,7 +1177,7 @@ void add_undo_var(Term* var){
 
 void add_undo_vars(Term* vars){
     if(Atom_eq(vars, atom_drop)) return;
-    Term** args = Functor_get(stack, atom_frame, 3);
+    Term** args = Functor_get(root.stack, atom_frame, 3);
     if(!args) return;
     Term** undo_vars = &args[1];
     if(Atom_eq(*undo_vars, atom_drop)) return;
@@ -1188,50 +1197,52 @@ void reset_undo_vars(Term* vars){
 }
 
 bool stack_push(atom_t atom, functor_size_t size, Term* term){
-    disable_gc();
-    Term* rules = HashTable_find(globals, Spec(atom, size));
-    enable_gc();
+    Term** spec = keep(Spec(atom, size));
+    Term* rules = HashTable_find(root.globals, *spec);
+    unkeep(spec);
     if(!rules){
         return error("No such predicate '%s'/%u", atom_to_string(atom)->ptr, size);
     }
     disable_gc();
-    Term* branches = Atom(atom_nil);
+    Term** branches = keep(Atom(atom_nil));
+    Term** head = keep(Atom(atom_nil));
+    Term** branch = keep(Atom(atom_nil));
     for(; !Atom_eq(rules, atom_nil); rules = List_tail(rules)){
-        Term* head = Term_copy(List_head(rules));
-        Term* branch;
-        Term** args = Functor_get(head, atom_entails, 2);
+        *head = Term_copy(List_head(rules));
+        Term** args = Functor_get(*head, atom_entails, 2);
         if(args){
-            branch = Functor2(atom_comma, Functor2(atom_eq, term, args[0]), args[1]);
+            *branch = Functor2(atom_comma, Functor2(atom_eq, term, args[0]), args[1]);
         }else{
-            branch = Functor2(atom_eq, term, head);
+            *branch = Functor2(atom_eq, term, *head);
         }
-        if(next_query){
-            branch = Functor2(atom_comma, branch, next_query);
+        if(root.next_query){
+            *branch = Functor2(atom_comma, *branch, root.next_query);
         }
-        branches = Functor2(atom_cons, branch, branches);
+        *branches = Functor2(atom_cons, *branch, *branches);
     }
-    if(Atom_eq(branches, atom_nil)){
-        enable_gc();
+    unkeep(branch);
+    unkeep(head);
+    if(Atom_eq(*branches, atom_nil)){
+        unkeep(branches);
         return error("No rules for predicate '%s/%u'", atom_to_string(atom), size);
     }
-    stack = Functor3(atom_frame, branches, Atom(atom_nil), stack);
-    next_query = NULL;
-    enable_gc();
+    root.stack = Functor3(atom_frame, unkeep(branches), Atom(atom_nil), root.stack);
+    root.next_query = NULL;
     return true;
 }
 
 bool stack_next(bool success){
     D_EVAL{
         debug("stack_next(%s)\n", success ? "true" : "fail");
-        trace_term("stack_next stack", stack);
-        if(next_query){
-            trace_term("stack_next next_query", next_query);
+        trace_term("stack_next stack", root.stack);
+        if(root.next_query){
+            trace_term("stack_next next_query", root.next_query);
         }
     }
-    if(Atom_eq(stack, atom_empty)){
+    if(Atom_eq(root.stack, atom_empty)){
         return false;
     }
-    Term** args = Functor_get(stack, atom_frame, 3);
+    Term** args = Functor_get(root.stack, atom_frame, 3);
     if(!args){
         fatal_error("stack should be empty/0 or frame/3");
     }
@@ -1240,10 +1251,10 @@ bool stack_next(bool success){
     Term* parent = args[2];
     if(success){
         disable_gc();
-        stack = parent;
+        root.stack = parent;
         add_undo_vars(*vars);
         enable_gc();
-        next_query = Atom(atom_true);
+        root.next_query = Atom(atom_true);
         return true;
     }else{
         reset_undo_vars(*vars);
@@ -1256,10 +1267,10 @@ bool stack_next(bool success){
                 *vars = Atom(atom_drop);
             }
             *branches = car_cdr[1];
-            next_query = car_cdr[0];
+            root.next_query = car_cdr[0];
             return true;
         }else{
-            stack = parent;
+            root.stack = parent;
             return stack_next(false);
         }
     }
@@ -1352,7 +1363,7 @@ bool prim_nl(){
 
 bool prim_cut(){
     disable_gc();
-    Term** frame = Functor_get(stack, atom_frame, 3);
+    Term** frame = Functor_get(root.stack, atom_frame, 3);
     frame[0] = Atom(atom_nil);
     enable_gc();
     return true;
@@ -1931,7 +1942,7 @@ bool eval_query(){
     while(true){
         SANITY_CHECK;
         bool success = true;
-        Term* term = chase(query);
+        Term* term = chase(root.query);
         switch(term->type){
         case INTEGER:
             evaluating = false;
@@ -1952,8 +1963,8 @@ bool eval_query(){
             Term** args = term->data.functor.args;
             if(atom == atom_comma && size == 2){
                 disable_gc();
-                next_query = next_query ? Functor2(atom_comma, args[1], next_query) : args[1];
-                query = args[0];
+                root.next_query = root.next_query ? Functor2(atom_comma, args[1], root.next_query) : args[1];
+                root.query = args[0];
                 enable_gc();
                 continue;
             }
@@ -1962,18 +1973,18 @@ bool eval_query(){
             }
             prim_t prim = find_prim(atom, size);
             if(prim){
-                guarantee(!prim_queries, "internal error: prim_queries should be empty");
+                guarantee(!root.prim_queries, "internal error: prim_queries should be empty");
                 success = prim(args);
-                if(prim_queries){
+                if(root.prim_queries){
                     if(success){
-                        if(next_query == NULL){
-                            next_query = Atom(atom_true);
+                        if(root.next_query == NULL){
+                            root.next_query = Atom(atom_true);
                         }
-                        for(Term* list = prim_queries; !Atom_eq(list, atom_nil); list = List_tail(list)){
-                            next_query = Functor2(atom_comma, List_head(list), next_query);
+                        for(Term* list = root.prim_queries; !Atom_eq(list, atom_nil); list = List_tail(list)){
+                            root.next_query = Functor2(atom_comma, List_head(list), root.next_query);
                         }
                     }
-                    prim_queries = NULL;
+                    root.prim_queries = NULL;
                 }
             }else{
                 if(!stack_push(atom, size, term)){
@@ -1982,15 +1993,15 @@ bool eval_query(){
                 }
                 success = false;
             }
-            if(!success || !next_query){
+            if(!success || !root.next_query){
                 if(!stack_next(success)){
-                    D_EVAL{ trace_term("eval stack", stack); }
+                    D_EVAL{ trace_term("eval stack", root.stack); }
                     evaluating = false;
                     return success;
                 }
             }
-            query = next_query;
-            next_query = NULL;
+            root.query = root.next_query;
+            root.next_query = NULL;
             break; }
         }
     }
@@ -2212,7 +2223,7 @@ Term* parse_simple_term(char** str, HashTable* vars){
     }
     Term* atom = parse_atomic(&pos, vars);
     if(!atom) return NULL;
-    if(is_Atom(atom) && HashTable_find(ops, atom)){
+    if(is_Atom(atom) && HashTable_find(root.ops, atom)){
         *str = pos;
         return atom;
     }
@@ -2255,7 +2266,7 @@ Term* combine_terms(integer_t prec, Term*** terms){
         }
         Term* ret = NULL;
         Term** ret_pos = NULL;
-        Term* list = is_Atom(*pos) ? HashTable_find(ops, *pos) : NULL;
+        Term* list = is_Atom(*pos) ? HashTable_find(root.ops, *pos) : NULL;
         if(!list){
             if(!left_term){
                 left_term = *pos++;
@@ -2263,7 +2274,7 @@ Term* combine_terms(integer_t prec, Term*** terms){
                     *terms = pos;
                     return left_term;
                 }
-                list = is_Atom(*pos) ? HashTable_find(ops, *pos) : NULL;
+                list = is_Atom(*pos) ? HashTable_find(root.ops, *pos) : NULL;
                 if(!list){
                     *terms = pos;
                     return left_term;
@@ -2437,10 +2448,10 @@ Term* parse_toplevel(char* str){
 }
 
 void add_prim_query (Term *query){
-    if(!prim_queries){
-        prim_queries = Atom(atom_nil);
+    if(!root.prim_queries){
+        root.prim_queries = Atom(atom_nil);
     }
-    prim_queries = Functor2(atom_cons, query, prim_queries);
+    root.prim_queries = Functor2(atom_cons, query, root.prim_queries);
 }
 
 bool assertz(Term* term){
@@ -2454,7 +2465,7 @@ bool assertz(Term* term){
             return false;
         }
         disable_gc();
-        HashTable_append(globals, Spec(head->data.functor.atom, head->data.functor.size), term);
+        HashTable_append(root.globals, Spec(head->data.functor.atom, head->data.functor.size), term);
         enable_gc();
         return true;
     }
@@ -2464,12 +2475,12 @@ bool assertz(Term* term){
         if(evaluating){
             add_prim_query(q);
         }else{
-            query = q;
+            root.query = q;
             return eval_query();
         }
     }
     disable_gc();
-    HashTable_append(globals, Spec(term->data.functor.atom, term->data.functor.size), term);
+    HashTable_append(root.globals, Spec(term->data.functor.atom, term->data.functor.size), term);
     enable_gc();
     return true;
 }
@@ -2484,7 +2495,7 @@ void eval_toplevel(Term* term){
         if(evaluating){
             add_prim_query(args[0]);
         }else{
-            query = args[0];
+            root.query = args[0];
             if(!eval_query()){
                 trace_term("failed directive", args[0]);
                 exit(1);
@@ -2531,7 +2542,7 @@ void load_base(){
     disable_gc();
 
 #define ADD_OP(prec, order, name) \
-    HashTable_append(ops, Atom(intern_nt(name)), Functor3(atom_op, Integer(prec), Atom(intern_nt(order)), Atom(intern_nt(name))))
+    HashTable_append(root.ops, Atom(intern_nt(name)), Functor3(atom_op, Integer(prec), Atom(intern_nt(order)), Atom(intern_nt(name))))
     ADD_OP(1200, "xfx", ":-");
     ADD_OP(1200, "xfx", "-->");
     ADD_OP(1200, "fx", ":-");
@@ -2593,7 +2604,7 @@ Term* vars_of(Term* term){
 
 void eval_interactive(Term* term){
     Term** vars = keep(vars_of(term));
-    query = term;
+    root.query = term;
     if(eval_query()){
         if(Atom_eq(*vars, atom_nil)){
             printf("yep.\n");
@@ -2710,10 +2721,10 @@ int main(int argc, char** argv){
     }
 
     pool = Pool_new();
-    globals = HashTable_new(GLOBALS_SIZE);
-    ops = HashTable_new(OPS_HASHTABLE_SIZE);
-    interned = HashTable_new(INTERNED_TABLE_SIZE);
-    atom_names = HashTable_new(INTERNED_TABLE_SIZE);
+    root.globals = HashTable_new(GLOBALS_SIZE);
+    root.ops = HashTable_new(OPS_HASHTABLE_SIZE);
+    root.interned = HashTable_new(INTERNED_TABLE_SIZE);
+    root.atom_names = HashTable_new(INTERNED_TABLE_SIZE);
     Streams_init();
 
     debug_sanity = please_debug_sanity;
@@ -2756,7 +2767,7 @@ int main(int argc, char** argv){
     atom_string = intern_nt("string");
     atom_string_first = intern_nt("string_first");
 
-    stack = Atom(atom_empty);
+    root.stack = Atom(atom_empty);
 
     load_base();
 
