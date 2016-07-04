@@ -14,7 +14,6 @@
 int kill(pid_t, int);
 
 #define LIB_PATH "boot/lib"
-#define PRELUDE_PATH LIB_PATH "/prelude.pl"
 
 #define GLOBALS_SIZE 4096
 #define POOL_SECTION_SIZE 4096
@@ -31,12 +30,17 @@ int kill(pid_t, int);
 
 #define UNREACHABLE __builtin_unreachable()
 
-#define D_PARSE if(debug_parse && *debug_enabled)
-#define D_EVAL if(debug_eval && *debug_enabled)
-#define D_GC if(debug_gc && *debug_enabled)
-#define D_HASHTABLE if(debug_hashtable && *debug_enabled)
-#define D_ATOM if(debug_atom && *debug_enabled)
-#define D_STRING if(debug_string && *debug_enabled)
+#define D_PARSE DEBUG_IF(debug_parse)
+#define D_EVAL DEBUG_IF(debug_eval)
+#define D_GC DEBUG_IF(debug_gc)
+#define D_HASHTABLE DEBUG_IF(debug_hashtable)
+#define D_ATOM DEBUG_IF(debug_atom)
+#define D_STRING DEBUG_IF(debug_string)
+
+#define DEBUG_IF(p) \
+    for(bool _debug_if = (disable_gc(), true); \
+        _debug_if && p && *debug_enabled; \
+        _debug_if = false, enable_gc())
 
 #define SANITY_CHECK do{ if(debug_sanity && *debug_enabled){ sanity_check_all(); } }while(0)
 
@@ -107,6 +111,8 @@ void fatal_error(char* format, ...);
 void load_file(char* path);
 void Term_render(Term* term, bool show_vars, renderer_t write, void* data);
 void sanity_check_all();
+void disable_gc();
+void enable_gc();
 
 Pool* pool = NULL;
 HashTable* globals = NULL;
@@ -120,9 +126,8 @@ Term* next_query = NULL;
 Term* prim_queries = NULL;
 Term* keeps[MAX_KEEPS];
 int gc_disable_count = 0;
-int alloc_disable_count = 0;
 bool would_gc = false;
-bool prelude_loaded = false;
+bool base_loaded = false;
 Stream streams[MAX_STREAMS];
 int free_stream = 0;
 
@@ -142,12 +147,12 @@ atom_t atom_string_concat, atom_string, atom_string_first;
 
 bool debug_eval = false;
 bool debug_hashtable = false;
-bool debug_gc = true;
+bool debug_gc = false;
 bool debug_atom = false;
 bool debug_parse = false;
 bool debug_sanity = false;
 bool debug_string = false;
-bool* debug_enabled = &prelude_loaded;
+bool* debug_enabled = &base_loaded;
 bool always = true;
 bool evaluating = false;
 
@@ -484,25 +489,16 @@ void gc(Pool** p){
 }
 
 void disable_gc(){
-    SANITY_CHECK;
     gc_disable_count++;
+    SANITY_CHECK;
 }
 
 void enable_gc(){
     gc_disable_count--;
-    if(would_gc && gc_disable_count == 0){
-        gc(&pool);
-        would_gc = false;
-    }else{
-        SANITY_CHECK;
-    }
+    SANITY_CHECK;
 }
 
 Term* Pool_add_term_gc(Pool** p){
-    if(alloc_disable_count){
-        debug(".");
-    }
-    guarantee(!alloc_disable_count, "allocation disabled");
     if((*p)->free >= (*p)->sections * POOL_SECTION_SIZE){
         if(gc_disable_count){
             would_gc = true;
@@ -535,7 +531,10 @@ void sanity_check_term(Term** term, ...){
 }
 
 void sanity_check_all(){
+    bool saved = debug_sanity;
+    debug_sanity = false;
     each_live_all((term_iterator_t)sanity_check_term, NULL);
+    debug_sanity = saved;
 }
 
 Term* unkeep(Term** term){
@@ -799,7 +798,11 @@ Term* atom_to_String(atom_t atom){
     atom_term.data.functor.size = 0;
     atom_term.data.functor.args = NULL;
     Term* term = HashTable_find(atom_names, &atom_term);
-    guarantee(term, "unknown atom %d", atom);
+    if(!term){
+        char buf[20];
+        snprintf(buf, 20, "?atom_%lu?", atom);
+        return String_nt(buf);
+    }
     guarantee(term->type == STRING, "internal error: atom names table contains non-string");
     return term;
 }
@@ -891,7 +894,6 @@ char* short_snippet(char* str, char* buf, size_t size){
 }
 
 void trace_term(char* format, Term* term, ...){
-    alloc_disable_count++;
     char buf[80];
     va_list argptr;
     va_start(argptr, term);
@@ -900,7 +902,6 @@ void trace_term(char* format, Term* term, ...){
     debug(": %s\n", short_snippet(buffer->ptr, buf, sizeof buf));
     Buffer_free(buffer);
     va_end(argptr);
-    alloc_disable_count--;
 }
 
 Term** Functor_get(Term* term, atom_t atom, functor_size_t size){
@@ -2506,7 +2507,7 @@ void load_file(char* path){
     unkeep(contents);
 }
 
-void load_prelude(){
+void load_base(){
     disable_gc();
 
 #define ADD_OP(prec, order, name) \
@@ -2524,9 +2525,9 @@ void load_prelude(){
 
     enable_gc();
 
-    load_file(PRELUDE_PATH);
+    load_file(LIB_PATH "/base.pl");
 
-    prelude_loaded = true;
+    base_loaded = true;
 }
 
 void list_vars(Term* term, HashTable* vars){
@@ -2648,7 +2649,8 @@ int main(int argc, char** argv){
     char* arg;
     char* file = NULL;
     char* eval = NULL;
-    char usage[] = "usage: poorlog [FILE] [-e EXPR] [-dparse] [-deval] [-dhashtable] [-dnogc] [-datom] [-dprelude] [-dsanity]";
+    char usage[] = "usage: poorlog [FILE] [-e EXPR] [-dparse] [-deval] [-dhashtable] [-dnogc] [-datom] [-dbase] [-dsanity]";
+    bool please_debug_sanity = false;
     while(*args){
         arg = *args++;
         if(*arg != '-' || (arg[0] && arg[1] == 0)){
@@ -2672,11 +2674,11 @@ int main(int argc, char** argv){
             if(!strcmp(arg+2, "parse")) debug_parse = true; else
             if(!strcmp(arg+2, "eval")) debug_eval = true; else
             if(!strcmp(arg+2, "hashtable")) debug_hashtable = true; else
-            if(!strcmp(arg+2, "nogc")) debug_gc = false; else
+            if(!strcmp(arg+2, "gc")) debug_gc = true; else
             if(!strcmp(arg+2, "atom")) debug_atom = true; else
-            if(!strcmp(arg+2, "sanity")) debug_sanity = true; else
+            if(!strcmp(arg+2, "sanity")) please_debug_sanity = true; else
             if(!strcmp(arg+2, "string")) debug_string = true; else
-            if(!strcmp(arg+2, "prelude")) debug_enabled = &always;
+            if(!strcmp(arg+2, "base")) debug_enabled = &always;
             else fatal_error("unknown debug mode: %s", arg+2);
             break;
         default:
@@ -2691,6 +2693,8 @@ int main(int argc, char** argv){
     interned = HashTable_new(INTERNED_TABLE_SIZE);
     atom_names = HashTable_new(INTERNED_TABLE_SIZE);
     Streams_init();
+
+    debug_sanity = please_debug_sanity;
 
     atom_cons = 1;
     atom_nil = 2;
@@ -2732,7 +2736,7 @@ int main(int argc, char** argv){
 
     stack = Atom(atom_empty);
 
-    load_prelude();
+    load_base();
 
     if(file){
         if(!strcmp(file, "-")){
