@@ -55,8 +55,10 @@ typedef struct {
     char* ptr;
 } Buffer;
 
+struct HashTable;
+
 typedef struct Term {
-    enum { FUNCTOR, VAR, MOVED, INTEGER, STRING } type;
+    enum { FUNCTOR, VAR, MOVED, INTEGER, STRING, DICT } type;
     union {
         integer_t integer;
         Buffer string;
@@ -70,6 +72,7 @@ typedef struct Term {
             atom_t name;
             struct Term* ref;
         } var;
+        struct HashTable* map;
     } data;
 } Term;
 
@@ -84,7 +87,7 @@ typedef struct {
     Term** terms;
 } Pool;
 
-typedef struct {
+typedef struct HashTable {
     size_t size;
     Term* table[1];
 } HashTable;
@@ -113,6 +116,7 @@ void Term_render(Term* term, bool show_vars, renderer_t write, void* data);
 void sanity_check_all();
 void disable_gc();
 void enable_gc();
+bool is_Atom(Term* term);
 
 Pool* pool = NULL;
 HashTable* globals = NULL;
@@ -388,6 +392,9 @@ void Term_destroy(Term* term){
     case STRING:
         free(term->data.string.ptr);
         break;
+    case DICT:
+        HashTable_free(term->data.map);
+        break;
     }
 }
 
@@ -446,6 +453,7 @@ void Pool_pour(Term** term, Pool *p){
             break;
         case INTEGER:
         case STRING:
+        case DICT:
             break;
         case MOVED:
             UNREACHABLE;
@@ -517,6 +525,7 @@ Term** keep(Term* term){
         if(!keeps[n]){
             last_idx = n;
             keeps[n] = term;
+            SANITY_CHECK;
             return &keeps[n];
         }
     }
@@ -538,6 +547,7 @@ void sanity_check_all(){
 }
 
 Term* unkeep(Term** term){
+    SANITY_CHECK;
     Term* ret = *term;
     *term = NULL;
     return ret;
@@ -720,6 +730,8 @@ hash_t hash_rec(Term* term, hash_t hash){
         return hash_string(&term->data.string, hash);
     case VAR:
         fatal_error("Cannot hash variable '%s'", term->data.var.name);
+    case DICT:
+        fatal_error("unimplemented: hash dict");
     case MOVED:
         fatal_error("Cannot hash a moved term");
     }
@@ -732,16 +744,14 @@ hash_t hash(Term* term){
 }
 
 atom_t intern(Term* str){
-    disable_gc();
     Term** term = HashTable_get(interned, str);
     if(*term){
-        if((*term)->type != FUNCTOR){
+        if(!is_Atom(*term)){
             fatal_error("interned term is not an atom");
         }
         D_ATOM{
             debug("already interned %s as %lu\n", str->data.string.ptr, (*term)->data.functor.atom);
         }
-        enable_gc();
         return (*term)->data.functor.atom;
     }
     atom_t atom = next_free_atom++;
@@ -751,37 +761,38 @@ atom_t intern(Term* str){
     D_ATOM{
         debug("interning %s as %lu\n", str->data.string.ptr, atom);
     }
-    enable_gc();
     return atom;
 }
 
 atom_t intern_nt(char* string){
-    disable_gc();
-    atom_t ret = intern(String_nt(string));
-    enable_gc();
+    Term** s = keep(String_nt(string));
+    atom_t ret = intern(*s);
+    unkeep(s);
     return ret;
 }
 
 void intern_prim(char* string, atom_t atom){
-    disable_gc();
-    Term* str = String_nt(string);
-    Term** term = HashTable_get(interned, str);
+    Term** str = keep(String_nt(string));
+    Term** term = HashTable_get(interned, *str);
     if(*term){
         fatal_error("prim '%s' already exists", string);
     }
     *term = Atom(atom);
     Term** rev = HashTable_get(atom_names, *term);
-    *rev = str;
+    *rev = *str;
+    unkeep(str);
     D_ATOM{
         debug("interning primitve %s as %lu\n", string, atom);
     }
-    enable_gc();
 }
 
 Term* Spec(atom_t atom, int size){
-    disable_gc();
-    return Functor2(atom_slash, Atom(atom), Integer(size));
-    enable_gc();
+    Term** tatom = keep(Atom(atom));
+    Term** tsize = keep(Integer(size));
+    Term* ret = Functor2(atom_slash, *tatom, *tsize);
+    unkeep(tatom);
+    unkeep(tsize);
+    return ret;
 }
 
 Term* chase(Term* term){
@@ -856,6 +867,8 @@ void Term_render(Term* term, bool show_vars, renderer_t write, void* data){
             write(data, ")", 1);
         }
     } break;
+    case DICT:
+        fatal_error("unimplemented: term_render dict");
     default:
         write(data, "#invalid", 8);
     }
@@ -980,6 +993,8 @@ bool Term_exact_eq(Term* a, Term* b){
             }
         }
         return true;
+    case DICT:
+        fatal_error("unimplemented: exact_eq dict");
     }
     UNREACHABLE;
 }
@@ -997,11 +1012,9 @@ Term** Assoc_get(Term** assoc, Term* key){
             return &args[1];
         }
     }
-    disable_gc();
-    Term* pair = Functor2(atom_colon, key, NULL);
-    *assoc = Functor2(atom_cons, pair, *assoc);
-    enable_gc();
-    return &pair->data.functor.args[1];
+    Term** pair = keep(Functor2(atom_colon, key, NULL));
+    *assoc = Functor2(atom_cons, *pair, *assoc);
+    return &unkeep(pair)->data.functor.args[1];
 }
 
 Term* Assoc_find(Term* assoc, Term* key){
@@ -1028,12 +1041,10 @@ Term** HashTable_get(HashTable* table, Term* key){
         trace_term("key (hash %u)", key, hkey);
         trace_term("assoc", *assoc);
     }
-    disable_gc();
     if(!*assoc){
         *assoc = Atom(atom_nil);
     }
     Term** val = Assoc_get(assoc, key);
-    enable_gc();
     D_HASHTABLE{
         trace_term("val", *val);
     }
@@ -1042,9 +1053,10 @@ Term** HashTable_get(HashTable* table, Term* key){
 
 void HashTable_append(HashTable* table, Term* key, Term* val){
     Term** list = HashTable_get(table, key);
-    disable_gc();
-    (*list) = Functor2(atom_cons, val, *list ? *list : Atom(atom_nil));
-    enable_gc();
+    if(!*list){
+        *list = Atom(atom_nil);
+    }
+    *list = Functor2(atom_cons, val, *list);
     D_HASHTABLE{
         debug("hashtable %p: append\n", (void*)table);
         trace_term("key", key);
@@ -1109,6 +1121,8 @@ Term* Term_copy_rec(Term* term, HashTable* vars){
         }
         return *copy;
     }
+    case DICT:
+        fatal_error("unimplemented: copyrec dict");
     case MOVED:
         fatal_error("Cannot copy a moved term");
         return NULL;
@@ -1293,6 +1307,8 @@ bool unify(Term* a, Term* b){
             }
         }
         return true;
+    case DICT:
+        fatal_error("unimplemented: unify dict");
     case MOVED:
         fatal_error("Cannot unify a moved term");
     case VAR:
@@ -1318,6 +1334,7 @@ integer_t eval_math(Term* expr){
     case VAR:
     case MOVED:
     case STRING:
+    case DICT:
     default:
         fatal_error("invalid math expression");
         UNREACHABLE;
@@ -1447,6 +1464,7 @@ void List_as_string_concat_into(Term* term, Buffer* buf){
         }
         case MOVED:
         case VAR:
+        case DICT:
         default:
             fatal_error("invalid string");
             UNREACHABLE;
@@ -1926,6 +1944,8 @@ bool eval_query(){
             return error("Cannot eval unbound variable '%s'", atom_to_string(term->data.var.name));
         case MOVED:
             fatal_error("Cannot eval moved term");
+        case DICT:
+            fatal_error("Cannot eval dict term");
         case FUNCTOR: {
             atom_t atom = term->data.functor.atom;
             functor_size_t size = term->data.functor.size;
@@ -2542,6 +2562,8 @@ void list_vars(Term* term, HashTable* vars){
             list_vars(term->data.functor.args[i], vars);
         }
         break;
+    case DICT:
+        fatal_error("unimplemented: list_vars dict");
     case MOVED:
     case INTEGER:
     case STRING:
