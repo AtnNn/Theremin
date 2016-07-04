@@ -4,5 +4,5 @@ d=$(dirname "$0")
 
 for test in "$d"/*.pl; do
     echo -n "$(basename "${test%.pl}"): "
-    diff -s "${test%.pl}.out" <("$d/../../poorlog" "$test")
+    diff -s "${test%.pl}.out" <("$d/../../poorlog" -dsanity "$test")
 done

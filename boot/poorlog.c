@@ -828,7 +828,7 @@ Buffer* atom_to_string(atom_t atom){
 
 void Term_render(Term* term, bool show_vars, renderer_t write, void* data){
     if(!term){
-        write(data, "#null", 5);
+        write(data, "?null?", 5);
         return;
     }
     if(!show_vars){
@@ -872,9 +872,9 @@ void Term_render(Term* term, bool show_vars, renderer_t write, void* data){
         }
     } break;
     case DICT:
-        fatal_error("unimplemented: term_render dict");
+        write(data, "?dict?", 6);
     default:
-        write(data, "#invalid", 8);
+        write(data, "?invalid?", 8);
     }
 }
 
@@ -1166,8 +1166,8 @@ bool Rule_spec(Term* term, atom_t* atom, int* size){
     return false;
 }
 
-void add_undo_var(Term* var){
-    Term** args = Functor_get(root.stack, atom_frame, 3);
+void add_undo_var(Term* stack, Term* var){
+    Term** args = Functor_get(stack, atom_frame, 3);
     if(!args) return;
     Term** undo_vars = &args[1];
     if(!Atom_eq(*undo_vars, atom_drop)){
@@ -1175,9 +1175,9 @@ void add_undo_var(Term* var){
     }
 }
 
-void add_undo_vars(Term* vars){
+void add_undo_vars(Term* stack, Term* vars){
     if(Atom_eq(vars, atom_drop)) return;
-    Term** args = Functor_get(root.stack, atom_frame, 3);
+    Term** args = Functor_get(stack, atom_frame, 3);
     if(!args) return;
     Term** undo_vars = &args[1];
     if(Atom_eq(*undo_vars, atom_drop)) return;
@@ -1203,7 +1203,6 @@ bool stack_push(atom_t atom, functor_size_t size, Term* term){
     if(!rules){
         return error("No such predicate '%s'/%u", atom_to_string(atom)->ptr, size);
     }
-    disable_gc();
     Term** branches = keep(Atom(atom_nil));
     Term** head = keep(Atom(atom_nil));
     Term** branch = keep(Atom(atom_nil));
@@ -1250,10 +1249,8 @@ bool stack_next(bool success){
     Term** vars = &args[1];
     Term* parent = args[2];
     if(success){
-        disable_gc();
+        add_undo_vars(parent, *vars);
         root.stack = parent;
-        add_undo_vars(*vars);
-        enable_gc();
         root.next_query = Atom(atom_true);
         return true;
     }else{
@@ -1283,7 +1280,7 @@ void set_var(Term* a, Term* b){
     if(a->type != VAR) fatal_error("Called set_var on non-var");
     if(a->data.var.ref != a) fatal_error("Cannot overwrite variable's value");
     a->data.var.ref = b;
-    add_undo_var(a);
+    add_undo_var(root.stack, a);
 }
 
 bool unify(Term* a, Term* b){
@@ -1328,6 +1325,13 @@ bool unify(Term* a, Term* b){
     UNREACHABLE;
 }
 
+bool unify_var_unkept(Term* var, Term* unkept){
+    Term** term = keep(unkept);
+    bool ret = unify(var, *term);
+    unkeep(term);
+    return ret;
+}
+
 integer_t eval_math(Term* expr){
     expr = chase(expr);
     D_EVAL{ trace_term("eval_math", expr); }
@@ -1362,10 +1366,8 @@ bool prim_nl(){
 }
 
 bool prim_cut(){
-    disable_gc();
     Term** frame = Functor_get(root.stack, atom_frame, 3);
     frame[0] = Atom(atom_nil);
-    enable_gc();
     return true;
 }
 
@@ -1374,12 +1376,7 @@ bool prim_assertz(Term** args){
 }
 
 bool prim_is(Term** args) {
-    Term* lhs = chase(args[0]);
-    Term* rhs = chase(args[1]);
-    disable_gc();
-    bool ret = unify(lhs, Integer(eval_math(rhs)));
-    enable_gc();
-    return ret;
+    return unify_var_unkept(args[0], Integer(eval_math(chase(args[1]))));
 }
 
 bool prim_univ(Term** args){
@@ -1527,10 +1524,10 @@ bool prim_process_create(Term** args){
     int input_stream, output_stream, error_stream, pid;
     bool ret =
         process_create(command_path, command_args, &input_stream, &output_stream, &error_stream, &pid) &&
-        unify(args[2], Integer(input_stream)) &&
-        unify(args[3], Integer(output_stream)) &&
-        unify(args[4], Integer(error_stream)) &&
-        unify(args[5], Integer(pid));
+        unify_var_unkept(args[2], Integer(input_stream)) &&
+        unify_var_unkept(args[3], Integer(output_stream)) &&
+        unify_var_unkept(args[4], Integer(error_stream)) &&
+        unify_var_unkept(args[5], Integer(pid));
     enable_gc();
     return ret;
 }
@@ -1572,11 +1569,11 @@ bool prim_read_string(Term** args){
     Stream* stream = Stream_get(stream_id);
     guarantee(max > 0, "invalid argument to read_string");
     if(stream->size > (size_t)max){
-        bool ret = unify(args[2], String(stream->buf + stream->pos, max));
+        bool ret = unify_var_unkept(args[2], String(stream->buf + stream->pos, max));
         stream->pos += max;
         return ret;
     }else if(stream->size > 0){
-        bool ret = unify(args[2], String(stream->buf + stream->pos, stream->size));
+        bool ret = unify_var_unkept(args[2], String(stream->buf + stream->pos, stream->size));
         stream->pos = 0;
         stream->size = 0;
         free(stream->buf);
@@ -1586,9 +1583,9 @@ bool prim_read_string(Term** args){
     }else{
         ssize_t res = read(stream->fd, buf, max);
         if(res == 0){
-            return unify(args[2], Atom(atom_eof));
+            return unify_var_unkept(args[2], Atom(atom_eof));
         }else if(res >= 1){
-            return unify(args[2], String(buf, res));
+            return unify_var_unkept(args[2], String(buf, res));
         }else{
             return error("warning: read failed: %s\n", strerror(errno));
         }
@@ -1600,15 +1597,13 @@ bool prim_string_codes(Term** args){
     Term* codes = chase(args[1]);
 
     if(string->type == VAR){
-        disable_gc();
         size_t size = List_length(codes);
         Term* term = String_unsafe(size);
         size_t n = 0;
         for(Term* list = codes; !Atom_eq(list, atom_nil); list = List_tail(list)){
             term->data.string.ptr[n++] = Term_integer(List_head(list));
         }
-        bool ret = unify(string, term);
-        enable_gc();
+        bool ret = unify_var_unkept(string, term);
         return ret;
     }else{
         disable_gc();
@@ -1630,15 +1625,11 @@ bool prim_atom_string(Term** args){
     Term* atom = chase(args[0]);
     Term* string = chase(args[1]);
     if(is_Atom(atom)){
-        disable_gc();
-        Buffer* s = atom_to_string(atom->data.functor.atom);
-        bool ret = unify(string, String(s->ptr, s->end));
-        enable_gc();
+        Term* s = atom_to_String(atom->data.functor.atom);
+        bool ret = unify_var_unkept(string, s);
         return ret;
     }else if(string->type == STRING){
-        disable_gc();
-        bool ret = unify(atom, Atom(intern(string)));
-        enable_gc();
+        bool ret = unify_var_unkept(atom, Atom(intern(string)));
         return ret;
     }else{
         fatal_error("invalid arguments to atom_string");
