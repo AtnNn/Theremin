@@ -502,12 +502,10 @@ void gc(Pool** p){
 
 void disable_gc(){
     gc_disable_count++;
-    SANITY_CHECK;
 }
 
 void enable_gc(){
     gc_disable_count--;
-    SANITY_CHECK;
 }
 
 Term* Pool_add_term_gc(Pool** p){
@@ -529,7 +527,6 @@ Term** keep(Term* term){
         if(!root.keeps[n]){
             last_idx = n;
             root.keeps[n] = term;
-            SANITY_CHECK;
             return &root.keeps[n];
         }
     }
