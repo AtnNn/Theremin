@@ -138,7 +138,7 @@ atom_t atom_process_create, atom_kill_process,
     atom_string_codes, atom_atom_string,
     atom_eof;
 
-atom_t atom_string_concat, atom_string;
+atom_t atom_string_concat, atom_string, atom_string_first;
 
 bool debug_eval = false;
 bool debug_hashtable = false;
@@ -1428,8 +1428,8 @@ bool process_create(char* path, char** args, int* in, int* out, int* err, int* p
 }
 
 void List_as_string_concat_into(Term* term, Buffer* buf){
-    for(; !Atom_eq(term, atom_nil); term = List_tail(term)){
-        Term* part = List_head(term);
+    for(; !Atom_eq(term, atom_nil); term = chase(List_tail(term))){
+        Term* part = chase(List_head(term));
         switch(part->type){
         case STRING:
             Buffer_append(buf, part->data.string.ptr, part->data.string.end);
@@ -1843,6 +1843,32 @@ bool prim_string_concat(Term** args){
     }
 }
 
+bool prim_string_first(Term** args){
+    Term* str = chase(args[0]);
+    Term* chr = chase(args[1]);
+    if(chr->type == VAR){
+        size_t n = 0;
+        char c;
+        bool res = String_next_char(&str, &n, &c);
+        guarantee(res, "string_first: empty string");
+        Term** cs = keep(String(&c, 1));
+        bool ret = unify_strings(chr, *cs);
+        unkeep(cs);
+        return ret;
+    }else{
+        Term* s = Term_String(chr);
+        guarantee(s->data.string.end == 1, "string_first: first argument is not a singleton");
+        Term** var = keep(Var(atom_underscore));
+        Term* concat_args[3];
+        concat_args[0] = chr;
+        concat_args[1] = *var;
+        concat_args[2] = str;
+        bool ret = prim_string_concat(concat_args);
+        unkeep(var);
+        return ret;
+    }
+}
+
 bool prim_string(Term** args){
     return chase(args[0])->type == STRING;
 }
@@ -1874,6 +1900,7 @@ prim_t find_prim(atom_t atom, functor_size_t size){
     PRIM(., 2, cons);
     PRIM(string_concat, 3, string_concat);
     PRIM(string, 1, string);
+    PRIM(string_first, 2, string_first);
 #undef PRIM
 
     return NULL;
@@ -2701,6 +2728,7 @@ int main(int argc, char** argv){
     atom_library = intern_nt("library");
     atom_string_concat = intern_nt("string_concat");
     atom_string = intern_nt("string");
+    atom_string_first = intern_nt("string_first");
 
     stack = Atom(atom_empty);
 
