@@ -1491,8 +1491,7 @@ bool prim_univ(Term** args){
         for(functor_size_t i = 0; i < functor->data.functor.size; i++){
             Var_push(&tail, functor->data.functor.args[i]);
         }
-        bool res = unify(tail, Nil());
-        assert(res, "failed");
+        set_var(tail, Nil());
         FRAME_RETURN(bool, unify(repr, list));
     }else{
         FRAME_RETURN(bool, false);
@@ -1675,31 +1674,28 @@ bool prim_read_string(Term** args){
 }
 
 bool prim_string_codes(Term** args){
-    Term* string = chase(args[0]);
-    Term* codes = chase(args[1]);
+    FRAME_ENTER;
+    FRAME_LOCAL(string) = chase(args[0]);
+    FRAME_LOCAL(codes) = chase(args[1]);
 
     if(string->type == VAR){
         size_t size = List_length(codes);
-        Term* term = String_unsafe(size);
+        FRAME_LOCAL(term) = String_unsafe(size);
         size_t n = 0;
-        for(Term* list = codes; !Atom_eq(list, atom_nil); list = List_tail(list)){
+        FRAME_LOCAL(list) = codes;
+        for(; !Atom_eq(list, atom_nil); list = List_tail(list)){
             term->data.string.ptr[n++] = Term_integer(List_head(list));
         }
-        bool ret = unify(string, term);
-        return ret;
+        FRAME_RETURN(bool, unify(string, term));
     }else{
-        disable_gc();
-        Buffer* s = Term_string(string);
-        Term* root = NULL;
-        Term** list = &root;
-        for(size_t i = 0; i < s->end; i++){
-            *list = Functor2(atom_cons, Integer(s->ptr[i]), NULL);
-            list = &(*list)->data.functor.args[1];
+        FRAME_LOCAL(s) = Term_String(string);
+        FRAME_LOCAL(list) = Var(atom_underscore);
+        FRAME_LOCAL(tail) = list;
+        for(size_t i = 0; i < s->data.string.end; i++){
+            Var_push(&tail, Integer(s->data.string.ptr[i]));
         }
-        *list = Nil();
-        bool ret = unify(codes, root);
-        enable_gc();
-        return ret;
+        set_var(tail, Nil());
+        FRAME_RETURN(bool, unify(codes, list));
     }
 }
 
@@ -2491,8 +2487,7 @@ Term* parse_toplevel(char* str){
         pos++;
         Var_push(&tail, term);
     }
-    bool res = unify(tail, Nil());
-    assert(res, "unify failed");
+    set_var(tail, Nil());
     FRAME_RETURN(Term*, list);
 }
 
