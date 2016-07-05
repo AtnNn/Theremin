@@ -1381,11 +1381,11 @@ bool stack_next(bool success){
 }
 
 void set_var(Term* a, Term* b){
+    assert(a->type == VAR, "not a variable");
+    assert(a->data.var.ref == a, "variable is already set");
     D_EVAL{
-        trace_term("unifying %s with", b, atom_to_string(a->data.var.name));
+        trace_term("unifying `%s' with", b, atom_to_string(a->data.var.name));
     }
-    if(a->type != VAR) fatal_error("Called set_var on non-var");
-    if(a->data.var.ref != a) fatal_error("Cannot overwrite variable's value");
     a->data.var.ref = b;
     add_undo_var(root.stack, a);
 }
