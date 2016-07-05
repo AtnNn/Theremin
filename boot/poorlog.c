@@ -259,31 +259,6 @@ bool always = true;
 
 #define FRAME_RETURN(type, ret) do{ type _frame_ret = ret; FRAME_LEAVE; return _frame_ret; }while(0)
 
-struct keep_info_t {
-    Term* term;
-    size_t frame_pos;
-} keeps[2048];
-
-Term** keep(Term* t){
-    int current_c_frame;
-    size_t i = 0;
-    while(keeps[i].term) i++;
-    // debug("keep i %zu f %zu\n", i, next_c_term);
-    keeps[i].frame_pos = next_c_term;
-    keeps[i].term = t;
-    FRAME_TRACK_VAR(keeps[i].term);
-    return &keeps[i].term;
-}
-
-Term* unkeep(Term** term){
-    struct keep_info_t* info = (struct keep_info_t*)term;
-    // debug("unkeep i %ld f %zu\n", info - keeps, next_c_term - 1);
-    guarantee(info->frame_pos == --next_c_term, "mismatched unkeep");
-    Term* ret = *term;
-    *term = NULL;
-    return ret;
-}
-
 void* system_alloc(size_t size){
     void* ret = malloc(size);
     if(!ret){
