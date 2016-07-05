@@ -2,11 +2,25 @@
 
 d=$(dirname "$0")
 failed=false
+poorlog=$d/../../poorlog
+
+simple_test () {
+    if ! "$poorlog" "$@"; then
+        echo "FAILED!"
+        echo "./poorlog $*"
+        exit 1
+    fi
+}
+
+simple_test -e true
+simple_test -dbase -dsanity -e true
 
 for test in "$d"/*.pl; do
     echo -n "$(basename "${test%.pl}"): "
-    if ! diff -s "${test%.pl}.out" <("$d/../../poorlog" -dsanity "$test"); then
+    if ! diff -s "${test%.pl}.out" <("$poorlog" -dsanity "$test"); then
         failed=true
         echo "./poorlog" -dsanity "$test"
     fi
 done
+
+$failed && exit 1

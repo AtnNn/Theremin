@@ -143,10 +143,6 @@ struct roots_t {
     HashTable* ops;
     HashTable* interned;
     HashTable* atom_names;
-    Term* stack;
-    Term* current_query;
-    Term* next_query;
-    Term* prim_queries;
     Term* nil;
     Term** c_terms[MAX_C_TERMS];
 } root;
@@ -161,7 +157,13 @@ bool base_loaded = false;
 Stream streams[MAX_STREAMS];
 int free_stream = 0;
 
-bool evaluating = false;
+typedef struct {
+    Term* query;
+    Term* next_query;
+    Term* stack;
+} eval_env_t;
+
+eval_env_t* current_eval_env;
 
 #define EACH_BUILTIN_ATOM(F) \
     F(atom_slash, "/") \
@@ -240,6 +242,7 @@ bool always = true;
 #define ENSURE_INSIDE_FRAME (void)current_c_frame
 
 #define FRAME_TRACK_VAR(name) ENSURE_INSIDE_FRAME; \
+    guarantee(next_c_term < MAX_C_TERMS, "C stack too big"); \
     root.c_terms[next_c_term++] = &(name)
 
 #define FRAME_LOCAL(name) ENSURE_INSIDE_FRAME; \
@@ -291,8 +294,8 @@ void fatal_error_(const char* func, char* format, ...){
     res = fprintf(stderr, "\n");
     guarantee_errno(res >= 0, "fprintf");
     va_end(argptr);
-    if(root.current_query){
-        trace_term("while evaluating", root.current_query);
+    if(current_eval_env && current_eval_env->query){
+        trace_term("while evaluating", current_eval_env->query);
     }
     BREAKPOINT;
     exit(1);
@@ -573,10 +576,6 @@ void each_root(term_iterator_t f, void* data){
     HashTable_each_list(root.ops, f, data);
     HashTable_each_list(root.interned, f, data);
     HashTable_each_list(root.atom_names, f, data);
-    if(root.stack){ f(&root.stack, data); }
-    if(root.current_query){ f(&root.current_query, data); }
-    if(root.next_query){ f(&root.next_query, data); }
-    if(root.prim_queries){ f(&root.prim_queries, data); }
     if(root.nil){ f(&root.nil, data); }
     for(size_t i = 0; i < next_c_term; i++){
         if(*root.c_terms[i]){
@@ -1311,7 +1310,7 @@ void reset_undo_vars(Term* vars){
     }
 }
 
-bool stack_push(atom_t atom, functor_size_t size, Term* term){
+bool stack_push(eval_env_t* eval, atom_t atom, functor_size_t size, Term* term){
     FRAME_ENTER_1(term);
     FRAME_LOCAL(spec) = Spec(atom, size);
     Term* rules = HashTable_find(root.globals, spec);
@@ -1329,31 +1328,31 @@ bool stack_push(atom_t atom, functor_size_t size, Term* term){
         }else{
             branch = Functor2(atom_eq, term, head);
         }
-        if(root.next_query){
-            branch = Functor2(atom_comma, branch, root.next_query);
+        if(eval->next_query){
+            branch = Functor2(atom_comma, branch, eval->next_query);
         }
         branches = Functor2(atom_cons, branch, branches);
     }
     if(Atom_eq(branches, atom_nil)){
         FRAME_RETURN(bool, error("No rules for predicate '%s/%u'", atom_to_string(atom), size));
     }
-    root.stack = Functor3(atom_frame, branches, Nil(), root.stack);
-    root.next_query = NULL;
+    eval->stack = Functor3(atom_frame, branches, Nil(), eval->stack);
+    eval->next_query = NULL;
     FRAME_RETURN(bool, true);
 }
 
-bool stack_next(bool success){
+bool stack_next(eval_env_t* eval, bool success){
     D_EVAL{
         debug("stack_next(%s)\n", success ? "true" : "fail");
-        trace_term("stack_next stack", root.stack);
-        if(root.next_query){
-            trace_term("stack_next next_query", root.next_query);
+        trace_term("stack_next stack", eval->stack);
+        if(eval->next_query){
+            trace_term("stack_next next_query", eval->next_query);
         }
     }
-    if(Atom_eq(root.stack, atom_empty)){
+    if(Atom_eq(eval->stack, atom_empty)){
         return false;
     }
-    Term** args = Functor_get(root.stack, atom_frame, 3);
+    Term** args = Functor_get(eval->stack, atom_frame, 3);
     if(!args){
         fatal_error("stack should be empty/0 or frame/3");
     }
@@ -1362,8 +1361,8 @@ bool stack_next(bool success){
     Term* parent = args[2];
     if(success){
         add_undo_vars(parent, *vars);
-        root.stack = parent;
-        root.next_query = Atom(atom_true);
+        eval->stack = parent;
+        eval->next_query = Atom(atom_true);
         return true;
     }else{
         reset_undo_vars(*vars);
@@ -1376,11 +1375,11 @@ bool stack_next(bool success){
                 *vars = Atom(atom_drop);
             }
             *branches = car_cdr[1];
-            root.next_query = car_cdr[0];
+            eval->next_query = car_cdr[0];
             return true;
         }else{
-            root.stack = parent;
-            return stack_next(false);
+            eval->stack = parent;
+            return stack_next(eval, false);
         }
     }
 }
@@ -1392,7 +1391,9 @@ void set_var(Term* a, Term* b){
         trace_term("set_var `%s'", b, atom_to_string(a->data.var.name)->ptr);
     }
     a->data.var.ref = b;
-    add_undo_var(root.stack, a);
+    if(current_eval_env){
+        add_undo_var(current_eval_env->stack, a);
+    }
 }
 
 bool unify(Term* a, Term* b){
@@ -1480,7 +1481,7 @@ bool prim_nl(){
 }
 
 bool prim_cut(){
-    Term** frame = Functor_get(root.stack, atom_frame, 3);
+    Term** frame = Functor_get(current_eval_env->stack, atom_frame, 3);
     frame[0] = Nil();
     return true;
 }
@@ -2016,20 +2017,26 @@ prim_t find_prim(atom_t atom, functor_size_t size){
 bool eval_query(Term* query){
     FRAME_ENTER_1(query);
     FRAME_LOCAL(term) = Nil();
-    evaluating = true;
+    eval_env_t eval;
+    eval.query = NULL; FRAME_TRACK_VAR(eval.query);
+    eval.next_query = NULL; FRAME_TRACK_VAR(eval.next_query);
+    eval.stack = Atom(atom_empty); FRAME_TRACK_VAR(eval.stack);
+    eval_env_t* prev_eval = current_eval_env;
+    current_eval_env = &eval;
     while(true){
         SANITY_CHECK;
         bool success = true;
         term = chase(query);
+        eval.query = term;
         switch(term->type){
         case INTEGER:
-            evaluating = false;
+            current_eval_env = prev_eval;
             FRAME_RETURN(bool, error("Cannot eval integer %ld", term->data.integer));
         case STRING:
-            evaluating = false;
+            current_eval_env = prev_eval;
             FRAME_RETURN(bool, error("Cannot eval string \"%s\"", term->data.string));
         case VAR:
-            evaluating = false;
+            current_eval_env = prev_eval;
             FRAME_RETURN(bool, error("Cannot eval unbound variable '%s'", atom_to_string(term->data.var.name)));
         case MOVED:
             fatal_error("Cannot eval moved term");
@@ -2040,7 +2047,7 @@ bool eval_query(Term* query){
             functor_size_t size = term->data.functor.size;
             Term** args = term->data.functor.args;
             if(atom == atom_comma && size == 2){
-                root.next_query = root.next_query ? Functor2(atom_comma, args[1], root.next_query) : args[1];
+                eval.next_query = eval.next_query ? Functor2(atom_comma, args[1], eval.next_query) : args[1];
                 query = args[0];
                 continue;
             }
@@ -2049,35 +2056,23 @@ bool eval_query(Term* query){
             }
             prim_t prim = find_prim(atom, size);
             if(prim){
-                guarantee(!root.prim_queries, "internal error: prim_queries should be empty");
                 success = prim(args);
-                if(root.prim_queries){
-                    if(success){
-                        if(root.next_query == NULL){
-                            root.next_query = Atom(atom_true);
-                        }
-                        for(Term* list = root.prim_queries; !Atom_eq(list, atom_nil); list = List_tail(list)){
-                            root.next_query = Functor2(atom_comma, List_head(list), root.next_query);
-                        }
-                    }
-                    root.prim_queries = NULL;
-                }
             }else{
-                if(!stack_push(atom, size, term)){
-                    evaluating = false;
+                if(!stack_push(&eval, atom, size, term)){
+                    current_eval_env = prev_eval;
                     FRAME_RETURN(bool, false);
                 }
                 success = false;
             }
-            if(!success || !root.next_query){
-                if(!stack_next(success)){
-                    D_EVAL{ trace_term("eval stack", root.stack); }
-                    evaluating = false;
+            if(!success || !eval.next_query){
+                if(!stack_next(&eval, success)){
+                    D_EVAL{ trace_term("eval stack", eval.stack); }
+                    current_eval_env = prev_eval;
                     FRAME_RETURN(bool, success);
                 }
             }
-            query = root.next_query;
-            root.next_query = NULL;
+            query = eval.next_query;
+            eval.next_query = NULL;
             break; }
         }
     }
@@ -2515,16 +2510,6 @@ Term* parse_toplevel(char* str){
     FRAME_RETURN(Term*, list);
 }
 
-void add_prim_query(Term *query){
-    D_EVAL{
-        trace_term("add prim query", query);
-    }
-    if(!root.prim_queries){
-        root.prim_queries = Nil();
-    }
-    root.prim_queries = Functor2(atom_cons, query, root.prim_queries);
-}
-
 bool assertz(Term* term){
     FRAME_ENTER_1(term);
     Term** args = Functor_get(term, atom_entails, 2);
@@ -2540,12 +2525,7 @@ bool assertz(Term* term){
     args = Functor_get(term, atom_long_rarrow, 2);
     if(args){
         FRAME_LOCAL(q) = Functor1(atom_assertz_dcg, term);
-        if(evaluating){
-            add_prim_query(q);
-            FRAME_RETURN(bool, true);
-        }else{
-            FRAME_RETURN(bool, eval_query(q));
-        }
+        FRAME_RETURN(bool, eval_query(q));
     }
     HashTable_append(root.globals, Spec(term->data.functor.atom, term->data.functor.size), term);
     FRAME_RETURN(bool, true);
@@ -2558,13 +2538,9 @@ void eval_toplevel(Term* term){
     }
     Term** args = Functor_get(term, atom_entails, 1);
     if(args){
-        if(evaluating){
-            add_prim_query(args[0]);
-        }else{
-            if(!eval_query(args[0])){
-                trace_term("failed directive", args[0]);
-                exit(1);
-            }
+        if(!eval_query(args[0])){
+            trace_term("failed directive", args[0]);
+            exit(1);
         }
         return;
     }
@@ -2790,8 +2766,6 @@ int main(int argc, char** argv){
 #define DEFINE_ATOM(name, string) intern_prim(string, name);
 
     EACH_BUILTIN_ATOM(DEFINE_ATOM)
-
-    root.stack = Atom(atom_empty);
 
     load_base();
 
