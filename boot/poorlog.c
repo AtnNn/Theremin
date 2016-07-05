@@ -38,12 +38,22 @@ int kill(pid_t, int);
 #define D_STRING DEBUG_IF(debug_string)
 #define D_SANITY DEBUG_IF(debug_sanity)
 
+#ifdef ISABLE_DEBUG
+#define DEBUG_IF(_) if(0)
+#else
 #define DEBUG_IF(p) \
     for(bool _debug_if = (disable_gc(), true); \
         _debug_if && p && *debug_enabled; \
         _debug_if = false, enable_gc())
+#endif
 
 #define SANITY_CHECK D_SANITY{ sanity_check_all(); }
+
+#ifdef ISABLE_ASSERTS
+#define ASSERT_CODE(...)
+#else
+#define ASSERT_CODE(...) __VA_ARGS__
+#endif
 
 typedef uint32_t hash_t;
 typedef uint8_t functor_size_t;
@@ -158,6 +168,7 @@ atom_t atom_process_create, atom_kill_process,
 
 atom_t atom_string_concat, atom_string, atom_string_first;
 
+#ifndef ISABLE_DEBUG
 bool debug_eval = false;
 bool debug_hashtable = false;
 bool debug_gc = false;
@@ -167,6 +178,8 @@ bool debug_sanity = false;
 bool debug_string = false;
 bool* debug_enabled = &base_loaded;
 bool always = true;
+#endif
+
 bool evaluating = false;
 
 #define guarantee(p, ...) do{ if(!(p)){ fatal_error(__VA_ARGS__); } }while(0)
@@ -592,10 +605,11 @@ void sanity_check_term(Term** term, ...){
 }
 
 void sanity_check_all(){
-    bool saved = debug_sanity;
-    debug_sanity = false;
+    static bool checking = false;
+    if(checking) return;
+    checking = true;
     each_live_all((term_iterator_t)sanity_check_term, NULL);
-    debug_sanity = saved;
+    checking = false;
 }
 
 Term* Integer(integer_t n){
@@ -2718,16 +2732,21 @@ int main(int argc, char** argv){
             exit(0);
             break;
         case 'd':
+            if(!strcmp(arg+2, "sanity")) please_debug_sanity = true; else
+#ifdef ISABLE_DEBUG
+            fatal_error("Debug modes are disabled. build without -DISABLE_DEBUG to enable.");
+            break;
+#else
             if(!strcmp(arg+2, "parse")) debug_parse = true; else
             if(!strcmp(arg+2, "eval")) debug_eval = true; else
             if(!strcmp(arg+2, "hashtable")) debug_hashtable = true; else
             if(!strcmp(arg+2, "gc")) debug_gc = true; else
             if(!strcmp(arg+2, "atom")) debug_atom = true; else
-            if(!strcmp(arg+2, "sanity")) please_debug_sanity = true; else
             if(!strcmp(arg+2, "string")) debug_string = true; else
             if(!strcmp(arg+2, "base")) debug_enabled = &always;
             else fatal_error("unknown debug mode: %s", arg+2);
             break;
+#endif
         default:
             fatal_error("unknown argument: %s\n%s\n", arg, usage);
             exit(1);
@@ -2741,7 +2760,9 @@ int main(int argc, char** argv){
     root.atom_names = HashTable_new(INTERNED_TABLE_SIZE);
     Streams_init();
 
+#ifndef ISABLE_DEBUG
     debug_sanity = please_debug_sanity;
+#endif
 
     atom_cons = 1;
     atom_nil = 2;

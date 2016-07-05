@@ -1,8 +1,12 @@
 #!/bin/bash
 
 d=$(dirname "$0")
+failed=false
 
 for test in "$d"/*.pl; do
     echo -n "$(basename "${test%.pl}"): "
-    diff -s "${test%.pl}.out" <("$d/../../poorlog" -dsanity "$test")
+    if ! diff -s "${test%.pl}.out" <("$d/../../poorlog" -dsanity "$test"); then
+        failed=true
+        echo "./poorlog" -dsanity "$test"
+    fi
 done

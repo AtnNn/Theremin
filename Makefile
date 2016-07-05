@@ -1,9 +1,10 @@
 CC := clang
-CCFLAGS ?= -Wall -Wextra -Werror -Wswitch-enum -Wswitch-default -g -std=c99 -pedantic-errors
+CFLAGS ?= -Wall -Wextra -Werror -Wswitch-enum -Wswitch-default -g -std=c99 -pedantic-errors
+# CFLAGS ?= -O3 -DISABLE_ASSERTS -DISABLE_DEBUG
 LDFLAGS ?=
 
-poorlog: boot/poorlog.c
-	$(CC) $(CCFLAGS) $(LDFLAGS) -o $@ $^
+poorlog: boot/poorlog.c Makefile
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $<
 
 test:
 	./boot/test/run
