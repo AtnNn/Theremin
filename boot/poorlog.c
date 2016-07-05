@@ -144,9 +144,10 @@ struct roots_t {
     HashTable* interned;
     HashTable* atom_names;
     Term* stack;
-    Term* query;
+    Term* current_query;
     Term* next_query;
     Term* prim_queries;
+    Term* nil;
     Term** c_terms[MAX_C_TERMS];
 } root;
 
@@ -160,6 +161,8 @@ bool would_gc = false;
 bool base_loaded = false;
 Stream streams[MAX_STREAMS];
 int free_stream = 0;
+
+bool evaluating = false;
 
 atom_t atom_slash, atom_colon, atom_nil, atom_cons, atom_op, atom_entails,
     atom_frame, atom_drop, atom_comma, atom_eq, atom_empty, atom_true,
@@ -186,8 +189,6 @@ bool debug_string = false;
 bool* debug_enabled = &base_loaded;
 bool always = true;
 #endif
-
-bool evaluating = false;
 
 #define fatal_error(...) fatal_error_(__func__, __VA_ARGS__)
 #define guarantee(p, ...) do{ if(!(p)){ fatal_error("guarantee failed `" #p "': " __VA_ARGS__); } }while(0)
@@ -228,7 +229,7 @@ bool evaluating = false;
     ASSERT_CODE(--c_frame_count;) \
     next_c_term = current_c_frame \
 
-#define FRAME_RETURN(type, ret) type _frame_ret = ret; FRAME_LEAVE; return _frame_ret
+#define FRAME_RETURN(type, ret) do{ type _frame_ret = ret; FRAME_LEAVE; return _frame_ret; }while(0)
 
 struct keep_info_t {
     Term* term;
@@ -285,8 +286,8 @@ void fatal_error_(const char* func, char* format, ...){
     res = fprintf(stderr, "\n");
     guarantee_errno(res >= 0, "fprintf");
     va_end(argptr);
-    if(root.query){
-        trace_term("while evaluating", root.query);
+    if(root.current_query){
+        trace_term("while evaluating", root.current_query);
     }
     BREAKPOINT;
     exit(1);
@@ -568,9 +569,10 @@ void each_root(term_iterator_t f, void* data){
     HashTable_each_list(root.interned, f, data);
     HashTable_each_list(root.atom_names, f, data);
     if(root.stack){ f(&root.stack, data); }
-    if(root.query){ f(&root.query, data); }
+    if(root.current_query){ f(&root.current_query, data); }
     if(root.next_query){ f(&root.next_query, data); }
     if(root.prim_queries){ f(&root.prim_queries, data); }
+    if(root.nil){ f(&root.nil, data); }
     for(size_t i = 0; i < next_c_term; i++){
         if(root.c_terms[i]){
             f(root.c_terms[i], data);
@@ -1014,6 +1016,11 @@ bool Atom_eq(Term* term, atom_t atom){
         return false;
     }
     return true;
+}
+
+Term* Nil(){
+    assert(root.nil, "nil not allocated yet");
+    return root.nil;
 }
 
 Term* List_head(Term* list){
@@ -1981,23 +1988,24 @@ prim_t find_prim(atom_t atom, functor_size_t size){
     return NULL;
 }
 
-bool eval_query(){
-    guarantee(!evaluating, "internal error: called eval_query recursively");
+bool eval_query(Term* query){
+    FRAME_ENTER_1(query);
+    FRAME_LOCAL(term) = Nil();
     evaluating = true;
     while(true){
         SANITY_CHECK;
         bool success = true;
-        Term* term = chase(root.query);
+        term = chase(query);
         switch(term->type){
         case INTEGER:
             evaluating = false;
-            return error("Cannot eval integer %ld", term->data.integer);
+            FRAME_RETURN(bool, error("Cannot eval integer %ld", term->data.integer));
         case STRING:
             evaluating = false;
-            return error("Cannot eval string \"%s\"", term->data.string);
+            FRAME_RETURN(bool, error("Cannot eval string \"%s\"", term->data.string));
         case VAR:
             evaluating = false;
-            return error("Cannot eval unbound variable '%s'", atom_to_string(term->data.var.name));
+            FRAME_RETURN(bool, error("Cannot eval unbound variable '%s'", atom_to_string(term->data.var.name)));
         case MOVED:
             fatal_error("Cannot eval moved term");
         case DICT:
@@ -2007,10 +2015,8 @@ bool eval_query(){
             functor_size_t size = term->data.functor.size;
             Term** args = term->data.functor.args;
             if(atom == atom_comma && size == 2){
-                disable_gc();
                 root.next_query = root.next_query ? Functor2(atom_comma, args[1], root.next_query) : args[1];
-                root.query = args[0];
-                enable_gc();
+                query = args[0];
                 continue;
             }
             D_EVAL{
@@ -2034,7 +2040,7 @@ bool eval_query(){
             }else{
                 if(!stack_push(atom, size, term)){
                     evaluating = false;
-                    return false;
+                    FRAME_RETURN(bool, false);
                 }
                 success = false;
             }
@@ -2042,10 +2048,10 @@ bool eval_query(){
                 if(!stack_next(success)){
                     D_EVAL{ trace_term("eval stack", root.stack); }
                     evaluating = false;
-                    return success;
+                    FRAME_RETURN(bool, success);
                 }
             }
-            root.query = root.next_query;
+            query = root.next_query;
             root.next_query = NULL;
             break; }
         }
@@ -2515,8 +2521,7 @@ bool assertz(Term* term){
         if(evaluating){
             add_prim_query(q);
         }else{
-            root.query = q;
-            return eval_query();
+            return eval_query(q);
         }
     }
     disable_gc();
@@ -2535,8 +2540,7 @@ void eval_toplevel(Term* term){
         if(evaluating){
             add_prim_query(args[0]);
         }else{
-            root.query = args[0];
-            if(!eval_query()){
+            if(!eval_query(args[0])){
                 trace_term("failed directive", args[0]);
                 exit(1);
             }
@@ -2570,12 +2574,13 @@ Term* parse_file(char* path){
 }
 
 void load_file(char* path){
-    Term** contents = keep(chase(parse_file(path)));
-    guarantee(*contents, "failed to parse file '%s'", path);
-    for(; !Atom_eq(*contents, atom_nil); *contents = chase(List_tail(*contents))){
-        eval_toplevel(List_head(*contents));
+    FRAME_ENTER;
+    FRAME_LOCAL(contents) = chase(parse_file(path));
+    guarantee(contents, "failed to parse file '%s'", path);
+    for(; !Atom_eq(contents, atom_nil); contents = chase(List_tail(contents))){
+        eval_toplevel(List_head(contents));
     }
-    unkeep(contents);
+    FRAME_LEAVE;
 }
 
 void load_base(){
@@ -2643,14 +2648,14 @@ Term* vars_of(Term* term){
 }
 
 void eval_interactive(Term* term){
-    Term** vars = keep(vars_of(term));
-    root.query = term;
-    if(eval_query()){
-        if(Atom_eq(*vars, atom_nil)){
+    FRAME_ENTER_1(term);
+    FRAME_LOCAL(vars) = vars_of(term);
+    if(eval_query(term)){
+        if(Atom_eq(vars, atom_nil)){
             printf("yep.\n");
         }else{
-            for(; !Atom_eq(*vars, atom_nil); *vars = List_tail(*vars)){
-                Buffer* buffer = Term_show(List_head(*vars), RENDER_NO_CHASE);
+            for(; !Atom_eq(vars, atom_nil); vars = List_tail(vars)){
+                Buffer* buffer = Term_show(List_head(vars), RENDER_NO_CHASE);
                 printf("%s.\n", buffer->ptr);
                 Buffer_free(buffer);
             }
@@ -2658,7 +2663,7 @@ void eval_interactive(Term* term){
     }else{
         printf("nope.\n");
     }
-    unkeep(vars);
+    FRAME_LEAVE;
 }
 
 void eval_stdin(char* prompt, void (*eval)(Term*)){
@@ -2783,6 +2788,8 @@ int main(int argc, char** argv){
     intern_prim(".", atom_cons);
     intern_prim("[]", atom_nil);
     intern_prim(":", atom_colon);
+
+    root.nil = Atom(atom_nil);
 
     atom_slash = intern_nt("/");
     atom_op = intern_nt("op");
