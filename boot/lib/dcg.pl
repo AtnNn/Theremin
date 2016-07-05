@@ -1,9 +1,9 @@
 
 whitespace --> " "; [9]; [10].
 
-many0(G) --> G, !, many0(G); {true}.
+many0(G) --> call(G), !, many0(G); {true}.
 
-many1(G) --> G, many0(G).
+many1(G) --> call(G), many0(G).
 
 char(C, S, R) :- string_first(S, C), string_append(C, R, S).
 

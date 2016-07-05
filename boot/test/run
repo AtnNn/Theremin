@@ -23,4 +23,6 @@ for test in "$d"/*.pl; do
     fi
 done
 
-$failed && exit 1
+if $failed; then
+    exit 1
+fi

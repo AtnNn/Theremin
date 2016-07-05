@@ -7,8 +7,10 @@
 :-(op(700, xfx, '=..')).
 :-(op(500, yfx, '+')).
 :-(op(700, xfx, 'is')).
+:-(op(400, yfx, '/')).
 
 :-([library(prelude)]).
 :-([library(list)]).
-%:-([library(dcg)]).
+:-([library(functional)]).
+:-([library(dcg)]).
 :-([library(string)]).

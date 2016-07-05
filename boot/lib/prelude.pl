@@ -12,6 +12,7 @@ convert_dcg_head(F, G, L, R) :-
     append(FArgs, [L, R], GArgs),
     G =.. GArgs.
 
+convert_dcg_body(V,_,_,_) :- var(V), !, fail.
 convert_dcg_body((A, B), (Ap, Bp), L, R) :-
     !,
     convert_dcg_body(A, Ap, L, X),

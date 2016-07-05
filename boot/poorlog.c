@@ -114,8 +114,10 @@ typedef struct {
 } Stream;
 
 enum render_flags_t {
-    RENDER_NO_CHASE,
-    RENDER_STRICT
+    RENDER_DEFAULT = 0,
+    RENDER_NO_CHASE = 1,
+    RENDER_STRICT = 2,
+    RENDER_NO_OP = 4
 };
 
 #define MIN(a,b) ((a) < (b) ? a : b)
@@ -130,11 +132,16 @@ Term** HashTable_get(HashTable* table, Term* key);
 Term* HashTable_find(HashTable* table, Term* key);
 void fatal_error_(const char* func, char* format, ...);
 void load_file(char* path);
-void Term_render(Term* term, int render_flags, renderer_t write, void* data);
 void sanity_check_all();
 void disable_gc();
 void enable_gc();
 bool is_Atom(Term* term);
+bool Atom_eq(Term* term, atom_t atom);
+Term** Functor_get(Term* term, atom_t atom, functor_size_t size);
+Term* List_head(Term* list);
+integer_t Term_integer(Term* term);
+Term* List_tail(Term* list);
+void Term_render(Term* term, int render_flags, int left_prec, int right_prec, bool in_list, renderer_t write, void* data);
 
 Pool* pool = NULL;
 
@@ -156,6 +163,7 @@ bool would_gc = false;
 bool base_loaded = false;
 Stream streams[MAX_STREAMS];
 int free_stream = 0;
+int def_outer_prec = 1200;
 
 typedef struct {
     Term* query;
@@ -197,7 +205,16 @@ eval_env_t* current_eval_env;
     F(atom_eof, "eof") \
     F(atom_string_concat, "string_concat") \
     F(atom_string, "string") \
-    F(atom_string_first, "string_first")
+    F(atom_string_first, "string_first") \
+    F(atom_var, "var") \
+    F(atom_listing, "listing") \
+    F(atom_xf, "xf") \
+    F(atom_yf, "yf") \
+    F(atom_xfx, "xfx") \
+    F(atom_xfy, "xfy") \
+    F(atom_yfx, "yfx") \
+    F(atom_fx, "fx") \
+    F(atom_fy, "fy")
 
 #define DECLARE_ATOM(a, _) a,
 enum builtin_atoms_t {
@@ -382,16 +399,17 @@ Buffer* Buffer_empty(size_t size){
 Buffer* Buffer_unsafe(size_t size){
     Buffer* buffer = Buffer_empty(size);
     buffer->end = size;
-    buffer->ptr[buffer->end] = 0;
     return buffer;
 }
 
 void Buffer_reserve(Buffer* buffer, size_t size){
-    if(!buffer->alloc_size){
+    if(!buffer->alloc_size && size){
         buffer->ptr = system_alloc(size + 1);
         buffer->ptr[0] = 0;
     }else if(buffer->end > size){
         return;
+    }else if(!size){
+        buffer->ptr = "\0";
     }else{
         buffer->ptr = system_realloc(buffer->ptr, size + 1);
     }
@@ -408,7 +426,9 @@ void Buffer_append(Buffer* buffer, char* str, size_t len){
     }
     memcpy(buffer->ptr + buffer->end, str, len);
     buffer->end += len;
-    buffer->ptr[buffer->end] = 0;
+    if(buffer->alloc_size){
+        buffer->ptr[buffer->end] = 0;
+    }
 }
 
 void Buffer_append_nt(Buffer* buffer, char* str){
@@ -429,7 +449,9 @@ Buffer* Buffer_new_nt(char* str){
 }
 
 void Buffer_free(Buffer* buffer){
-    free(buffer->ptr);
+    if(buffer->alloc_size){
+        free(buffer->ptr);
+    }
     free(buffer);
 }
 
@@ -618,7 +640,7 @@ Term* Pool_add_term_gc(Pool** p){
 void do_nothing(){ }
 
 void sanity_check_term(Term** term, ...){
-    Term_render(*term, RENDER_STRICT, do_nothing, NULL);
+    Term_render(*term, RENDER_STRICT | RENDER_NO_OP, def_outer_prec, def_outer_prec, false, do_nothing, NULL);
 }
 
 void sanity_check_all(){
@@ -901,7 +923,147 @@ Buffer* atom_to_string(atom_t atom){
     return &atom_to_String(atom)->data.string;
 }
 
-void Term_render(Term* term, int render_flags, renderer_t write, void* data){
+int op_type_arg_size(atom_t type){
+    switch(type){
+    case atom_xf:
+    case atom_yf:
+    case atom_fx:
+    case atom_fy:
+        return 1;
+    case atom_xfx:
+    case atom_yfx:
+    case atom_xfy:
+        return 2;
+    default:
+        fatal_error("invalid op type");
+        UNREACHABLE;
+    }
+}
+
+void op_type(integer_t prec, atom_t atom, integer_t *left, integer_t *right){
+    switch(atom){
+    case atom_xf:
+    case atom_xfx:
+    case atom_xfy:
+        *left = prec; break;
+    case atom_yf:
+    case atom_yfx:
+        *left = prec -1; break;
+    case atom_fx:
+    case atom_fy:
+        *left = 0; break;
+    default:
+        fatal_error("invalid op spec");
+    }
+    switch(atom){
+    case atom_fx:
+    case atom_xfx:
+    case atom_yfx:
+        *right = prec; break;
+    case atom_fy:
+    case atom_xfy:
+        *right = prec -1; break;
+    case atom_xf:
+    case atom_yf:
+        *right = 0;
+    default:
+        fatal_error("invalid op spec");
+    }
+}
+
+bool Functor_render_op(Term* term, int render_flags, int left_prec, int right_prec, bool in_list, renderer_t write, void* data){
+    FRAME_ENTER_1(term);
+    assert(term->type == FUNCTOR, "not a functor");
+    if(term->data.functor.size > 2 || term->data.functor.size == 0){
+        FRAME_RETURN(bool, false);
+    }
+    Term** cons = Functor_get(term, atom_cons, 2);
+    if(cons){
+        FRAME_LOCAL(car) = cons[0];
+        FRAME_LOCAL(cdr) = cons[1];
+        write(data, "[", 1);
+        while(true){
+            Term_render(car, render_flags, def_outer_prec, def_outer_prec, true, write, data);
+            Term** cons = Functor_get(cdr, atom_cons, 2);
+            if(cons){
+                car = cons[0];
+                cdr = cons[1];
+                write(data, ", ", 2);
+                continue;
+            }else if(Atom_eq(cdr, atom_nil)){
+                break;
+            }else{
+                write(data, " | ", 3);
+                Term_render(cdr, render_flags, def_outer_prec, def_outer_prec, true, write, data);
+                break;
+            }
+        }
+        write(data, "]", 1);
+        FRAME_RETURN(bool, true);
+    }
+    FRAME_LOCAL(list) = HashTable_find(root.ops, Atom(term->data.functor.atom));
+    if(!list){
+        FRAME_RETURN(bool, false);
+    }
+    int inner_prec;
+    atom_t type;
+    while(true){
+        if(Atom_eq(list, atom_nil)){
+            FRAME_RETURN(bool, false);
+        }
+        Term** args = Functor_get(List_head(list), atom_op, 3);
+        inner_prec = Term_integer(args[0]);
+        assert(args[1]->type == FUNCTOR, "invalid op spec");
+        type = args[1]->data.functor.atom;
+        if(op_type_arg_size(type) == term->data.functor.size){
+            break;
+        }
+        list = List_tail(list);
+    }
+    integer_t left;
+    integer_t right;
+    op_type(inner_prec, type, &left, &right);
+    bool parens = left > left_prec || right > right_prec;
+
+    if(in_list && term->data.functor.atom == atom_comma){
+        parens = true;
+    }
+
+    // ATN
+    // char buf[100];
+    // sprintf(buf, " %d[%lu ", left_prec, left);
+    // write(data, buf, strlen(buf));
+
+    if(parens){
+        left_prec = def_outer_prec;
+        right_prec = def_outer_prec;
+        write(data, "(", 1);
+    }
+    int next = 0;
+    if(left){
+        FRAME_LOCAL(arg) = term->data.functor.args[next++];
+        Term_render(arg, render_flags, left_prec, left, false, write, data);
+    }
+    write(data, " ", 1);
+    Buffer* s = atom_to_string(term->data.functor.atom);
+    write(data, s->ptr, s->end);
+    write(data, " ", 1);
+    if(right){
+        FRAME_LOCAL(arg) = term->data.functor.args[next];
+        Term_render(arg, render_flags, right, right_prec, false, write, data);
+    }
+    if(parens){
+        write(data, ")", 1);
+    }
+
+    // ATN
+    // sprintf(buf, " %lu]%d ", right, right_prec);
+    // write(data, buf, strlen(buf));
+
+    FRAME_RETURN(bool, true);
+}
+
+void Term_render(Term* term, int render_flags, int left_prec, int right_prec, bool in_list, renderer_t write, void* data){
     if(!term){
         if(render_flags & RENDER_STRICT){
             fatal_error("null term");
@@ -921,7 +1083,7 @@ void Term_render(Term* term, int render_flags, renderer_t write, void* data){
         break;
     case VAR:
         if(term->data.var.ref != term){
-            Term_render(term->data.var.ref, render_flags, write, data);
+            Term_render(term->data.var.ref, render_flags, left_prec, right_prec, in_list, write, data);
         }else{
             Buffer* name = atom_to_string(term->data.var.name);
             write(data, name->ptr, name->end);
@@ -938,20 +1100,22 @@ void Term_render(Term* term, int render_flags, renderer_t write, void* data){
         write(data, term->data.string.ptr, term->data.string.end);
         write(data, "\"", 1);
         break;
-    case FUNCTOR: {
-        Buffer* name = atom_to_string(term->data.functor.atom);
-        write(data, name->ptr, name->end);
-        if(term->data.functor.size){
-            write(data, "(", 1);
-            for(int i = 0; i < term->data.functor.size; i++){
-                Term_render(term->data.functor.args[i], render_flags, write, data);
-                if(i + 1 < term->data.functor.size){
-                    write(data, ", ", 2);
+    case FUNCTOR:
+        if (render_flags & RENDER_NO_OP || !Functor_render_op(term, render_flags, left_prec, right_prec, in_list, write, data)) {
+            Buffer* name = atom_to_string(term->data.functor.atom);
+            write(data, name->ptr, name->end);
+            if(term->data.functor.size){
+                write(data, "(", 1);
+                for(int i = 0; i < term->data.functor.size; i++){
+                    Term_render(term->data.functor.args[i], render_flags, def_outer_prec, def_outer_prec, true, write, data);
+                    if(i + 1 < term->data.functor.size){
+                        write(data, ", ", 2);
+                    }
                 }
+                write(data, ")", 1);
             }
-            write(data, ")", 1);
         }
-    } break;
+        break;
     case DICT:
         write(data, "?dict?", 6);
     default:
@@ -964,7 +1128,7 @@ void Term_render(Term* term, int render_flags, renderer_t write, void* data){
 
 Buffer* Term_show(Term* term, int render_flags){
     Buffer* buffer = Buffer_empty(0);
-    Term_render(term, render_flags, (renderer_t)Buffer_append, buffer);
+    Term_render(term, render_flags, def_outer_prec, def_outer_prec, false, (renderer_t)Buffer_append, buffer);
     Buffer_shrink(buffer);
     return buffer;
 }
@@ -1174,7 +1338,7 @@ void render_fprintf(FILE* out, char* str, size_t size){
 }
 
 void Term_print(Term* term){
-    Term_render(term, 0, (renderer_t)render_fprintf, stdout);
+    Term_render(term, RENDER_DEFAULT, def_outer_prec, def_outer_prec, false, (renderer_t)render_fprintf, stdout);
 }
 
 bool prim_print(Term** args){
@@ -1981,6 +2145,23 @@ bool prim_string(Term** args){
     return chase(args[0])->type == STRING;
 }
 
+bool prim_var(Term** args){
+    return chase(args[0])->type == VAR;
+}
+
+bool prim_listing(Term** args){
+    FRAME_ENTER;
+    FRAME_LOCAL(rules) = HashTable_find(root.globals, chase(args[0]));
+    if(!rules){
+        FRAME_RETURN(bool, false);
+    }
+    for(; !Atom_eq(rules, atom_nil); rules = chase(List_tail(rules))){
+        Term_print(List_head(rules));
+        printf("\n");
+    }
+    FRAME_RETURN(bool, true);
+}
+
 prim_t find_prim(atom_t atom, functor_size_t size){
 
 #define PRIM(f, n, r) \
@@ -2009,6 +2190,8 @@ prim_t find_prim(atom_t atom, functor_size_t size){
     PRIM(string_concat, 3, string_concat);
     PRIM(string, 1, string);
     PRIM(string_first, 2, string_first);
+    PRIM(var, 1, var);
+    PRIM(listing,1,listing);
 #undef PRIM
 
     return NULL;
@@ -2309,23 +2492,6 @@ Term* parse_simple_term(char** str, HashTable* vars){
     return atom;
 }
 
-void op_type(integer_t prec, atom_t atom, integer_t *left, integer_t *right){
-    char* spec = atom_to_string(atom)->ptr;
-    char* r = spec + 2;
-    switch(spec[0]){
-    case 'x': *left = prec; break;
-    case 'y': *left = prec - 1; break;
-    case 'f': *left = 0; r = spec + 1; break;
-    default: fatal_error("invalid op spec '%s'", spec);
-    }
-    switch(*r){
-    case 'x': *right = prec; break;
-    case 'y': *right = prec - 1; break;
-    case 0: *right = 0;
-    default: fatal_error("invalid op spec '%s'", spec);
-    }
-}
-
 Term* combine_terms(integer_t prec, Term*** terms){
     Term** pos = *terms;
     Term* left_term = NULL;
@@ -2560,7 +2726,10 @@ Term* parse_file(char* path){
     res = fseek(fp, 0, SEEK_SET); guarantee_errno(res >= 0, "fseek");
 
     Buffer* data = Buffer_unsafe(size);
-    size_t res_size = fread(data->ptr, size, 1, fp); guarantee(res_size == 1, "fread failed");
+    if(size){
+        size_t res_size = fread(data->ptr, size, 1, fp); guarantee(res_size == 1, "fread failed");
+    }
+
     res = fclose(fp); guarantee(res >= 0, "fclose");
 
     Term* list = parse_toplevel(data->ptr);
