@@ -178,7 +178,7 @@ bool evaluating = false;
     F(atom_true, "true") \
     F(atom_underscore, "_") \
     F(atom_assertz_dcg, "assertz_dcg") \
-    F(atom_rarrow, "->") \
+    F(atom_long_rarrow, "-->") \
     F(atom_braces, "{}") \
     F(atom_library, "library") \
     F(atom_is, "is") \
@@ -1359,7 +1359,7 @@ void set_var(Term* a, Term* b){
     assert(a->type == VAR, "not a variable");
     assert(a->data.var.ref == a, "variable is already set");
     D_EVAL{
-        trace_term("unifying `%s' with", b, atom_to_string(a->data.var.name));
+        trace_term("set_var `%s'", b, atom_to_string(a->data.var.name)->ptr);
     }
     a->data.var.ref = b;
     add_undo_var(root.stack, a);
@@ -1405,6 +1405,15 @@ bool unify(Term* a, Term* b){
         UNREACHABLE;
     }
     UNREACHABLE;
+}
+
+void Var_push(Term** var, Term* term){
+    FRAME_ENTER_1(term);
+    FRAME_LOCAL(ret) = Var(atom_underscore);
+    bool ok = unify(*var, Functor2(atom_cons, term, ret));
+    guarantee(ok, "internal error: failed to unify");
+    *var = ret;
+    FRAME_LEAVE;
 }
 
 integer_t eval_math(Term* expr){
@@ -1455,18 +1464,18 @@ bool prim_is(Term** args) {
 }
 
 bool prim_univ(Term** args){
-    Term* functor = chase(args[0]);
-    Term* repr = chase(args[1]);
+    FRAME_ENTER;
+    FRAME_LOCAL(functor) = chase(args[0]);
+    FRAME_LOCAL(repr) = chase(args[1]);
     if(functor->type == VAR){
-        Term* name = chase(List_head(repr));
-        if(!is_Atom(name)) fatal_error("atom expected in '=..'/2");
+        FRAME_LOCAL(name) = chase(List_head(repr));
+        guarantee(is_Atom(name), "atom expected in '=..'/2");
         functor_size_t size = 0;
         for(Term* list = chase(List_tail(repr));
             !Atom_eq(list, atom_nil);
             list = chase(List_tail(list))){
             size++;
         }
-        disable_gc();
         Term* term = Functor_unsafe(name->data.functor.atom, size);
         functor_size_t i = 0;
         for(Term* list = chase(List_tail(repr));
@@ -1474,23 +1483,19 @@ bool prim_univ(Term** args){
             list = chase(List_tail(list)), i++){
             Functor_set_arg(term, i, chase(List_head(list)));
         }
-        bool ret = unify(functor, term);
-        enable_gc();
-        return ret;
+        FRAME_TRACK_VAR(term);
+        FRAME_RETURN(bool, unify(functor, term));
     }else if(functor->type == FUNCTOR){
-        disable_gc();
-        Term* list = Functor2(atom_cons, Atom(functor->data.functor.atom), NULL);
-        Term** rest = &list->data.functor.args[1];
+        FRAME_LOCAL(tail) = Var(atom_underscore);
+        FRAME_LOCAL(list) = Functor2(atom_cons, Atom(functor->data.functor.atom), tail);
         for(functor_size_t i = 0; i < functor->data.functor.size; i++){
-            *rest = Functor2(atom_cons, functor->data.functor.args[i], NULL);
-            rest = &(*rest)->data.functor.args[1];
+            Var_push(&tail, functor->data.functor.args[i]);
         }
-        *rest = Nil();
-        bool ret = unify(repr, list);
-        enable_gc();
-        return ret;
+        bool res = unify(tail, Nil());
+        assert(res, "failed");
+        FRAME_RETURN(bool, unify(repr, list));
     }else{
-        return false;
+        FRAME_RETURN(bool, false);
         UNREACHABLE;
     }
 }
@@ -1529,8 +1534,10 @@ bool process_create(char* path, char** args, int* in, int* out, int* err, int* p
 }
 
 void List_as_string_concat_into(Term* term, Buffer* buf){
+    FRAME_ENTER_1(term);
+    FRAME_LOCAL(part) = Nil();
     for(; !Atom_eq(term, atom_nil); term = chase(List_tail(term))){
-        Term* part = chase(List_head(term));
+        part = chase(List_head(term));
         switch(part->type){
         case STRING:
             Buffer_append(buf, part->data.string.ptr, part->data.string.end);
@@ -1553,20 +1560,22 @@ void List_as_string_concat_into(Term* term, Buffer* buf){
             UNREACHABLE;
         }
     }
+    FRAME_LEAVE;
 }
 
 Term* Term_String(Term* term){
+    FRAME_ENTER_1(term);
     term = chase(term);
     if(term->type == STRING){
-        return term;
+        FRAME_RETURN(Term*, term);
     }else if(Atom_eq(term, atom_nil)){
-        return String("",0);
+        FRAME_RETURN(Term*, String("",0));
     }else if(is_Atom(term)){
-        return atom_to_String(term->data.functor.atom);
+        FRAME_RETURN(Term*, atom_to_String(term->data.functor.atom));
     }else{
-        Term* str = String_unsafe(0);
+        FRAME_LOCAL(str) = String_unsafe(0);
         List_as_string_concat_into(term, &str->data.string);
-        return str;
+        FRAME_RETURN(Term*, str);
     }
 }
 
@@ -1589,9 +1598,7 @@ bool prim_process_create(Term** args){
     command_args[0] = command_path;
     size_t n = 1;
     for(Term* list = args[1]; !Atom_eq(list, atom_nil); list = List_tail(list)){
-        if(n >= sizeof(command_args) - 1){
-            fatal_error("too many arguments for process");
-        }
+        guarantee(n < sizeof(command_args) - 1, "too many arguments for process");
         command_args[n] = Term_string(List_head(list))->ptr;
         n++;
     }
@@ -1734,15 +1741,6 @@ bool prim_cons(Term** args){
     }
     enable_gc();
     return true;
-}
-
-void Var_push(Term** var, Term* term){
-    FRAME_ENTER_1(term);
-    FRAME_LOCAL(ret) = Var(atom_underscore);
-    bool ok = unify(*var, Functor2(atom_cons, term, ret));
-    guarantee(ok, "internal error: failed to unify");
-    *var = ret;
-    FRAME_LEAVE;
 }
 
 Term* String_concat(Term* a, Term* b){
@@ -2498,7 +2496,10 @@ Term* parse_toplevel(char* str){
     FRAME_RETURN(Term*, list);
 }
 
-void add_prim_query (Term *query){
+void add_prim_query(Term *query){
+    D_EVAL{
+        trace_term("add prim query", query);
+    }
     if(!root.prim_queries){
         root.prim_queries = Nil();
     }
@@ -2515,17 +2516,26 @@ bool assertz(Term* term){
             }
             return false;
         }
+        D_EVAL{
+            trace_term("regular assertz", term);
+        }
         disable_gc();
         HashTable_append(root.globals, Spec(head->data.functor.atom, head->data.functor.size), term);
         enable_gc();
         return true;
     }
-    args = Functor_get(term, atom_rarrow, 2);
+    args = Functor_get(term, atom_long_rarrow, 2);
     if(args){
         Term* q = Functor1(atom_assertz_dcg, term);
         if(evaluating){
+            D_EVAL{
+                trace_term("delayed dcg assertz", term);
+            }
             add_prim_query(q);
         }else{
+            D_EVAL{
+                trace_term("immediate dcg assertz", term);
+            }
             return eval_query(q);
         }
     }
