@@ -23,7 +23,7 @@ int kill(pid_t, int);
 #define OPS_HASHTABLE_SIZE 1024
 #define MAX_NO_PAREN_TERMS 1024
 #define MAX_STREAMS 256
-#define MAX_KEEPS 256
+#define MAX_C_TERMS 1024
 
 #define HASH_INIT 2166136261
 #define HASH_PRIME 16777619
@@ -36,13 +36,14 @@ int kill(pid_t, int);
 #define D_HASHTABLE DEBUG_IF(debug_hashtable)
 #define D_ATOM DEBUG_IF(debug_atom)
 #define D_STRING DEBUG_IF(debug_string)
+#define D_SANITY DEBUG_IF(debug_sanity)
 
 #define DEBUG_IF(p) \
     for(bool _debug_if = (disable_gc(), true); \
         _debug_if && p && *debug_enabled; \
         _debug_if = false, enable_gc())
 
-#define SANITY_CHECK do{ if(debug_sanity && *debug_enabled){ sanity_check_all(); } }while(0)
+#define SANITY_CHECK D_SANITY{ sanity_check_all(); }
 
 typedef uint32_t hash_t;
 typedef uint8_t functor_size_t;
@@ -129,10 +130,13 @@ struct roots_t {
     Term* query;
     Term* next_query;
     Term* prim_queries;
-    Term* keeps[MAX_KEEPS];
+    Term** c_terms[MAX_C_TERMS];
 } root;
 
 atom_t next_free_atom;
+size_t next_c_term = 0;
+size_t c_frame_count = 0;
+
 int gc_disable_count = 0;
 bool would_gc = false;
 bool base_loaded = false;
@@ -167,6 +171,60 @@ bool evaluating = false;
 #define guarantee(p, ...) do{ if(!(p)){ fatal_error(__VA_ARGS__); } }while(0)
 #define guarantee_errno(p, f) guarantee(p, "%s failed: %s", f, strerror(errno))
 #define debug(...) do{ int _debug_res = fprintf(stderr, __VA_ARGS__); guarantee_errno(_debug_res, "fprintf"); }while(0)
+
+#define INIT_FRAME \
+    size_t current_c_frame_count = ++c_frame_count; \
+    size_t current_c_frame = next_c_term
+
+#define INIT_FRAME_1(a) INIT_FRAME; TRACK_VAR(a)
+#define INIT_FRAME_2(a, b) INIT_FRAME; TRACK_VAR(a); TRACK_VAR(b)
+#define INIT_FRAME_3(a, b, c) INIT_FRAME; TRACK_VAR(a); TRACK_VAR(b); TRACK_VAR(c)
+
+#define ENSURE_INSIDE_FRAME (void)current_c_frame
+
+#define TRACK_VAR(name) ENSURE_INSIDE_FRAME; \
+    root.c_terms[next_c_term++] = &(name)
+
+#define LOCAL(name) ENSURE_INSIDE_FRAME; \
+    Term* name = NULL; \
+    TRACK_VAR(name); \
+    name
+
+#define FRAME_RETURN ENSURE_INSIDE_FRAME; \
+    D_SANITY{ \
+        guarantee(                                              \
+                  current_c_frame <= next_c_term &&             \
+                  c_frame_count == current_c_frame_count,       \
+                  "internal error: c frame mismatch");          \
+    }                                                           \
+    next_c_term = current_c_frame;                              \
+    --c_frame_count;                                            \
+    return
+
+struct keep_info_t {
+    Term* term;
+    size_t frame_pos;
+} keeps[2048];
+
+Term** keep(Term* t){
+    int current_c_frame;
+    size_t i = 0;
+    while(keeps[i].term) i++;
+    // debug("keep i %zu f %zu\n", i, next_c_term);
+    keeps[i].frame_pos = next_c_term;
+    keeps[i].term = t;
+    TRACK_VAR(keeps[i].term);
+    return &keeps[i].term;
+}
+
+Term* unkeep(Term** term){
+    struct keep_info_t* info = (struct keep_info_t*)term;
+    // debug("unkeep i %ld f %zu\n", info - keeps, next_c_term - 1);
+    guarantee(info->frame_pos == --next_c_term, "mismatched unkeep");
+    Term* ret = *term;
+    *term = NULL;
+    return ret;
+}
 
 void* system_alloc(size_t size){
     void* ret = malloc(size);
@@ -482,9 +540,9 @@ void each_live_all(term_iterator_t f, void* data){
     if(root.query){ f(&root.query, data); }
     if(root.next_query){ f(&root.next_query, data); }
     if(root.next_query){ f(&root.prim_queries, data); }
-    for(size_t i = 0; i < MAX_KEEPS; i++){
-        if(root.keeps[i]){
-            f(&root.keeps[i], data);
+    for(size_t i = 0; i < next_c_term; i++){
+        if(root.c_terms[i]){
+            f(root.c_terms[i], data);
         }
     }
 }
@@ -520,20 +578,6 @@ Term* Pool_add_term_gc(Pool** p){
      return term;
 }
 
-Term** keep(Term* term){
-    static size_t last_idx = 0;
-    for(size_t i = 0; i < MAX_KEEPS; i++){
-        size_t n = (i + last_idx) % MAX_KEEPS;
-        if(!root.keeps[n]){
-            last_idx = n;
-            root.keeps[n] = term;
-            return &root.keeps[n];
-        }
-    }
-    fatal_error("internal error: not enough keeps");
-    UNREACHABLE;
-}
-
 void do_nothing(){ }
 
 void sanity_check_term(Term** term, ...){
@@ -545,13 +589,6 @@ void sanity_check_all(){
     debug_sanity = false;
     each_live_all((term_iterator_t)sanity_check_term, NULL);
     debug_sanity = saved;
-}
-
-Term* unkeep(Term** term){
-    SANITY_CHECK;
-    Term* ret = *term;
-    *term = NULL;
-    return ret;
 }
 
 Term* Integer(integer_t n){
@@ -766,34 +803,34 @@ atom_t intern(Term* str){
 }
 
 atom_t intern_nt(char* string){
-    Term** s = keep(String_nt(string));
-    atom_t ret = intern(*s);
-    unkeep(s);
-    return ret;
+    INIT_FRAME;
+    LOCAL(s) = String_nt(string);
+    atom_t ret = intern(s);
+    FRAME_RETURN ret;
 }
 
 void intern_prim(char* string, atom_t atom){
-    Term** str = keep(String_nt(string));
-    Term** term = HashTable_get(root.interned, *str);
+    INIT_FRAME;
+    LOCAL(str) = String_nt(string);
+    Term** term = HashTable_get(root.interned, str);
     if(*term){
         fatal_error("prim '%s' already exists", string);
     }
     *term = Atom(atom);
     Term** rev = HashTable_get(root.atom_names, *term);
-    *rev = *str;
-    unkeep(str);
+    *rev = str;
     D_ATOM{
         debug("interning primitve %s as %lu\n", string, atom);
     }
+    FRAME_RETURN;
 }
 
 Term* Spec(atom_t atom, int size){
-    Term** tatom = keep(Atom(atom));
-    Term** tsize = keep(Integer(size));
-    Term* ret = Functor2(atom_slash, *tatom, *tsize);
-    unkeep(tatom);
-    unkeep(tsize);
-    return ret;
+    INIT_FRAME;
+    LOCAL(tatom) = Atom(atom);
+    LOCAL(tsize) = Integer(size);
+    Term* ret = Functor2(atom_slash, tatom, tsize);
+    FRAME_RETURN ret;
 }
 
 Term* chase(Term* term){
@@ -1001,6 +1038,7 @@ bool Term_exact_eq(Term* a, Term* b){
 }
 
 Term** Assoc_get(Term** assoc, Term* key){
+    INIT_FRAME_1(key);
     for(Term* list = *assoc; !Atom_eq(list, atom_nil); list = List_tail(list)){
         Term** args = Functor_get(List_head(list), atom_colon, 2);
         if(!args) fatal_error("Not an assoc list");
@@ -1010,12 +1048,12 @@ Term** Assoc_get(Term** assoc, Term* key){
                     trace_term("hash collision", key);
                 }
             }
-            return &args[1];
+            FRAME_RETURN &args[1];
         }
     }
-    Term** pair = keep(Functor2(atom_colon, key, NULL));
-    *assoc = Functor2(atom_cons, *pair, *assoc);
-    return &unkeep(pair)->data.functor.args[1];
+    LOCAL(pair) = Functor2(atom_colon, key, NULL);
+    *assoc = Functor2(atom_cons, pair, *assoc);
+    FRAME_RETURN &pair->data.functor.args[1];
 }
 
 Term* Assoc_find(Term* assoc, Term* key){
@@ -1144,10 +1182,10 @@ Term* Map(size_t size){
 }
 
 Term* Term_copy(Term* term){
-    Term** vars = keep(Map(COLLISION_HASHTABLE_SIZE));
-    Term* copy = Term_copy_rec(term, (*vars)->data.dict);
-    unkeep(vars);
-    return copy;
+    INIT_FRAME_1(term);
+    LOCAL(vars) = Map(COLLISION_HASHTABLE_SIZE);
+    Term* copy = Term_copy_rec(term, vars->data.dict);
+    FRAME_RETURN copy;
 }
 
 bool Rule_spec(Term* term, atom_t* atom, int* size){
@@ -1194,37 +1232,34 @@ void reset_undo_vars(Term* vars){
 }
 
 bool stack_push(atom_t atom, functor_size_t size, Term* term){
-    Term** spec = keep(Spec(atom, size));
-    Term* rules = HashTable_find(root.globals, *spec);
-    unkeep(spec);
+    INIT_FRAME_1(term);
+    LOCAL(spec) = Spec(atom, size);
+    Term* rules = HashTable_find(root.globals, spec);
     if(!rules){
-        return error("No such predicate '%s'/%u", atom_to_string(atom)->ptr, size);
+        FRAME_RETURN error("No such predicate '%s'/%u", atom_to_string(atom)->ptr, size);
     }
-    Term** branches = keep(Atom(atom_nil));
-    Term** head = keep(Atom(atom_nil));
-    Term** branch = keep(Atom(atom_nil));
+    LOCAL(branches) = Atom(atom_nil);
+    LOCAL(head) = Atom(atom_nil);
+    LOCAL(branch) = Atom(atom_nil);
     for(; !Atom_eq(rules, atom_nil); rules = List_tail(rules)){
-        *head = Term_copy(List_head(rules));
-        Term** args = Functor_get(*head, atom_entails, 2);
+        head = Term_copy(List_head(rules));
+        Term** args = Functor_get(head, atom_entails, 2);
         if(args){
-            *branch = Functor2(atom_comma, Functor2(atom_eq, term, args[0]), args[1]);
+            branch = Functor2(atom_comma, Functor2(atom_eq, term, args[0]), args[1]);
         }else{
-            *branch = Functor2(atom_eq, term, *head);
+            branch = Functor2(atom_eq, term, head);
         }
         if(root.next_query){
-            *branch = Functor2(atom_comma, *branch, root.next_query);
+            branch = Functor2(atom_comma, branch, root.next_query);
         }
-        *branches = Functor2(atom_cons, *branch, *branches);
+        branches = Functor2(atom_cons, branch, branches);
     }
-    unkeep(branch);
-    unkeep(head);
-    if(Atom_eq(*branches, atom_nil)){
-        unkeep(branches);
-        return error("No rules for predicate '%s/%u'", atom_to_string(atom), size);
+    if(Atom_eq(branches, atom_nil)){
+        FRAME_RETURN error("No rules for predicate '%s/%u'", atom_to_string(atom), size);
     }
-    root.stack = Functor3(atom_frame, unkeep(branches), Atom(atom_nil), root.stack);
+    root.stack = Functor3(atom_frame, branches, Atom(atom_nil), root.stack);
     root.next_query = NULL;
-    return true;
+    FRAME_RETURN true;
 }
 
 bool stack_next(bool success){
