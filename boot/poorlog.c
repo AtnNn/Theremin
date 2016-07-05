@@ -151,7 +151,6 @@ struct roots_t {
     Term** c_terms[MAX_C_TERMS];
 } root;
 
-atom_t next_free_atom;
 size_t next_c_term = 0;
 size_t c_frame_count = 0;
 const char* current_frame_func;
@@ -164,19 +163,48 @@ int free_stream = 0;
 
 bool evaluating = false;
 
-atom_t atom_slash, atom_colon, atom_nil, atom_cons, atom_op, atom_entails,
-    atom_frame, atom_drop, atom_comma, atom_eq, atom_empty, atom_true,
-    atom_underscore, atom_assertz_dcg, atom_rarrow, atom_braces, atom_library;
+#define EACH_BUILTIN_ATOM(F) \
+    F(atom_slash, "/") \
+    F(atom_colon, ":") \
+    F(atom_nil, "[]") \
+    F(atom_cons, ".") \
+    F(atom_op, "op") \
+    F(atom_entails, ":-") \
+    F(atom_frame, "frame") \
+    F(atom_drop, "drop") \
+    F(atom_comma, ",") \
+    F(atom_eq, "=") \
+    F(atom_empty, "empty") \
+    F(atom_true, "true") \
+    F(atom_underscore, "_") \
+    F(atom_assertz_dcg, "assertz_dcg") \
+    F(atom_rarrow, "->") \
+    F(atom_braces, "{}") \
+    F(atom_library, "library") \
+    F(atom_is, "is") \
+    F(atom_add, "+") \
+    F(atom_process_create, "process_create") \
+    F(atom_kill_process, "kill_process") \
+    F(atom_close, "close") \
+    F(atom_read, "read") \
+    F(atom_write, "write") \
+    F(atom_read_string, "read_string") \
+    F(atom_write_string, "write_string") \
+    F(atom_string_codes, "string_codes") \
+    F(atom_atom_string, "atom_string") \
+    F(atom_eof, "eof") \
+    F(atom_string_concat, "string_concat") \
+    F(atom_string, "string") \
+    F(atom_string_first, "string_first")
 
-atom_t atom_is, atom_add;
+#define DECLARE_ATOM(a, _) a,
+enum builtin_atoms_t {
+    atom_invalid = 0,
+    EACH_BUILTIN_ATOM(DECLARE_ATOM)
+    first_free_atom
+};
 
-atom_t atom_process_create, atom_kill_process,
-    atom_close, atom_read, atom_write,
-    atom_read_string, atom_write_string,
-    atom_string_codes, atom_atom_string,
-    atom_eof;
-
-atom_t atom_string_concat, atom_string, atom_string_first;
+atom_t next_free_atom = first_free_atom;
 
 #ifndef ISABLE_DEBUG
 bool debug_eval = false;
@@ -1019,7 +1047,9 @@ bool Atom_eq(Term* term, atom_t atom){
 }
 
 Term* Nil(){
-    assert(root.nil, "nil not allocated yet");
+    if(!root.nil){
+        root.nil = Atom(atom_nil);
+    }
     return root.nil;
 }
 
@@ -1127,7 +1157,7 @@ Term** HashTable_get(HashTable* table, Term* key){
         trace_term("assoc", *assoc);
     }
     if(!*assoc){
-        *assoc = Atom(atom_nil);
+        *assoc = Nil();
     }
     Term** val = Assoc_get(assoc, key);
     D_HASHTABLE{
@@ -1139,7 +1169,7 @@ Term** HashTable_get(HashTable* table, Term* key){
 void HashTable_append(HashTable* table, Term* key, Term* val){
     Term** list = HashTable_get(table, key);
     if(!*list){
-        *list = Atom(atom_nil);
+        *list = Nil();
     }
     *list = Functor2(atom_cons, val, *list);
     D_HASHTABLE{
@@ -1283,9 +1313,9 @@ bool stack_push(atom_t atom, functor_size_t size, Term* term){
     if(!rules){
         FRAME_RETURN(bool, error("No such predicate '%s'/%u", atom_to_string(atom)->ptr, size));
     }
-    FRAME_LOCAL(branches) = Atom(atom_nil);
-    FRAME_LOCAL(head) = Atom(atom_nil);
-    FRAME_LOCAL(branch) = Atom(atom_nil);
+    FRAME_LOCAL(branches) = Nil();
+    FRAME_LOCAL(head) = Nil();
+    FRAME_LOCAL(branch) = Nil();
     for(; !Atom_eq(rules, atom_nil); rules = List_tail(rules)){
         head = Term_copy(List_head(rules));
         Term** args = Functor_get(head, atom_entails, 2);
@@ -1302,7 +1332,7 @@ bool stack_push(atom_t atom, functor_size_t size, Term* term){
     if(Atom_eq(branches, atom_nil)){
         FRAME_RETURN(bool, error("No rules for predicate '%s/%u'", atom_to_string(atom), size));
     }
-    root.stack = Functor3(atom_frame, branches, Atom(atom_nil), root.stack);
+    root.stack = Functor3(atom_frame, branches, Nil(), root.stack);
     root.next_query = NULL;
     FRAME_RETURN(bool, true);
 }
@@ -1332,7 +1362,7 @@ bool stack_next(bool success){
         return true;
     }else{
         reset_undo_vars(*vars);
-        *vars = Atom(atom_nil);
+        *vars = Nil();
         Term** car_cdr = Functor_get(*branches, atom_cons, 2);
         if(car_cdr){
             Term** cadr_args = Functor_get(car_cdr[1], atom_frame, 3);
@@ -1437,7 +1467,7 @@ bool prim_nl(){
 
 bool prim_cut(){
     Term** frame = Functor_get(root.stack, atom_frame, 3);
-    frame[0] = Atom(atom_nil);
+    frame[0] = Nil();
     return true;
 }
 
@@ -1480,7 +1510,7 @@ bool prim_univ(Term** args){
             *rest = Functor2(atom_cons, functor->data.functor.args[i], NULL);
             rest = &(*rest)->data.functor.args[1];
         }
-        *rest = Atom(atom_nil);
+        *rest = Nil();
         bool ret = unify(repr, list);
         enable_gc();
         return ret;
@@ -1684,7 +1714,7 @@ bool prim_string_codes(Term** args){
             *list = Functor2(atom_cons, Integer(s->ptr[i]), NULL);
             list = &(*list)->data.functor.args[1];
         }
-        *list = Atom(atom_nil);
+        *list = Nil();
         bool ret = unify(codes, root);
         enable_gc();
         return ret;
@@ -2083,7 +2113,7 @@ Term* parse_args(char **str, atom_t atom, HashTable* vars){
         return NULL;
     }
     pos++;
-    Term* list = Atom(atom_nil);
+    Term* list = Nil();
     functor_size_t count = 0;
     while(true){
         if(*pos == ')'){
@@ -2218,7 +2248,7 @@ Term* parse_list(char** str, HashTable* vars){
             pos = spaces(pos);
             if(*pos == ']'){
                 *str = pos + 1;
-                return Atom(atom_nil);
+                return Nil();
             }else{
                 return NULL;
             }
@@ -2241,7 +2271,7 @@ Term* parse_list(char** str, HashTable* vars){
         }else if(*pos == ']'){
             pos++;
             *str = pos;
-            *rest = Atom(atom_nil);
+            *rest = Nil();
             return list;
         }else{
             return NULL;
@@ -2488,14 +2518,14 @@ Term* parse_toplevel(char* str){
         pos++;
         Var_push(&tail, term);
     }
-    bool res = unify(tail, Atom(atom_nil));
+    bool res = unify(tail, Nil());
     assert(res, "unify failed");
     FRAME_RETURN(Term*, list);
 }
 
 void add_prim_query (Term *query){
     if(!root.prim_queries){
-        root.prim_queries = Atom(atom_nil);
+        root.prim_queries = Nil();
     }
     root.prim_queries = Functor2(atom_cons, query, root.prim_queries);
 }
@@ -2632,7 +2662,7 @@ Term* vars_of(Term* term){
     HashTable* vars = HashTable_new(PARSE_VARS_HASHTABLE_SIZE);
     disable_gc();
     list_vars(term, vars);
-    Term *list = Atom(atom_nil);
+    Term *list = Nil();
     for(size_t i = 0; i < vars->size; i++){
         Term* assoc = vars->table[i];
         if(assoc){
@@ -2771,6 +2801,7 @@ int main(int argc, char** argv){
     }
 
     pool = Pool_new();
+
     root.globals = HashTable_new(GLOBALS_SIZE);
     root.ops = HashTable_new(OPS_HASHTABLE_SIZE);
     root.interned = HashTable_new(INTERNED_TABLE_SIZE);
@@ -2781,45 +2812,9 @@ int main(int argc, char** argv){
     debug_sanity = please_debug_sanity;
 #endif
 
-    atom_cons = 1;
-    atom_nil = 2;
-    atom_colon = 3;
-    next_free_atom = 4;
-    intern_prim(".", atom_cons);
-    intern_prim("[]", atom_nil);
-    intern_prim(":", atom_colon);
+#define DEFINE_ATOM(name, string) intern_prim(string, name);
 
-    root.nil = Atom(atom_nil);
-
-    atom_slash = intern_nt("/");
-    atom_op = intern_nt("op");
-    atom_entails = intern_nt(":-");
-    atom_drop = intern_nt("drop");
-    atom_frame = intern_nt("frame");
-    atom_eq = intern_nt("=");
-    atom_comma = intern_nt(",");
-    atom_empty = intern_nt("empty");
-    atom_true = intern_nt("true");
-    atom_underscore = intern_nt("_");
-    atom_rarrow = intern_nt("-->");
-    atom_assertz_dcg = intern_nt("assertz_dcg");
-    atom_is = intern_nt("is");
-    atom_add = intern_nt("+");
-    atom_process_create = intern_nt("process_create");
-    atom_kill_process = intern_nt("kill_process");
-    atom_close = intern_nt("close");
-    atom_read = intern_nt("read");
-    atom_write = intern_nt("write");
-    atom_read_string = intern_nt("read_string");
-    atom_write_string = intern_nt("write_string");
-    atom_string_codes = intern_nt("string_codes");
-    atom_atom_string = intern_nt("atom_string");
-    atom_eof = intern_nt("eof");
-    atom_braces = intern_nt("{}");
-    atom_library = intern_nt("library");
-    atom_string_concat = intern_nt("string_concat");
-    atom_string = intern_nt("string");
-    atom_string_first = intern_nt("string_first");
+    EACH_BUILTIN_ATOM(DEFINE_ATOM)
 
     root.stack = Atom(atom_empty);
 
