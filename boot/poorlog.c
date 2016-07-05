@@ -577,7 +577,7 @@ void each_root(term_iterator_t f, void* data){
     if(root.prim_queries){ f(&root.prim_queries, data); }
     if(root.nil){ f(&root.nil, data); }
     for(size_t i = 0; i < next_c_term; i++){
-        if(root.c_terms[i]){
+        if(*root.c_terms[i]){
             f(root.c_terms[i], data);
         }
     }
@@ -1185,8 +1185,17 @@ bool prim_true(){
 }
 
 bool prim_op(Term** args){
-    HashTable_append(root.ops, args[2], Functor3(atom_op, args[0], args[1], args[2]));
-    return true;
+    FRAME_ENTER;
+    FRAME_LOCAL(prec) = chase(args[0]);
+    FRAME_LOCAL(type) = chase(args[1]);
+    FRAME_LOCAL(name) = chase(args[2]);
+    guarantee(
+              prec->type == INTEGER &&
+              type->type == FUNCTOR &&
+              name->type == FUNCTOR,
+              "invalid op spec");
+    HashTable_append(root.ops, name, Functor3(atom_op, prec, type, name));
+    FRAME_RETURN(bool, true);
 }
 
 Term* Term_copy_rec(Term* term, HashTable* vars){
@@ -1225,7 +1234,7 @@ void HashTable_reset(HashTable* table){
     memset(table->table, 0, sizeof(Term*) * table->size);
 }
 
-Term* Map(size_t size){
+Term* Dict(size_t size){
     Term* term = Pool_add_term_gc(&pool);
     term->type = DICT;
     term->data.dict = HashTable_new(size);
@@ -1234,7 +1243,7 @@ Term* Map(size_t size){
 
 Term* Term_copy(Term* term){
     FRAME_ENTER_1(term);
-    FRAME_LOCAL(vars) = Map(COLLISION_HASHTABLE_SIZE);
+    FRAME_LOCAL(vars) = Dict(COLLISION_HASHTABLE_SIZE);
     FRAME_RETURN(Term*, Term_copy_rec(term, vars->data.dict));
 }
 
@@ -1716,27 +1725,23 @@ bool prim_atom_string(Term** args){
 }
 
 bool prim_cons(Term** args){
+    FRAME_ENTER;
     guarantee(Atom_eq(args[1], atom_nil), "load should be a singleton");
-    Term* lib = Functor_get(args[0], atom_library, 1)[0];
-    char *path;
-    disable_gc();
+    FRAME_LOCAL(lib) = Functor_get(args[0], atom_library, 1)[0];
+    Buffer* path = Buffer_empty(128);
     if(lib){
         Buffer* name = Term_string(lib);
-        size_t sz = sizeof(LIB_PATH) + strlen(name->ptr);
-        path = system_alloc(sz + 4);
-        memcpy(path, LIB_PATH, sizeof(LIB_PATH));
-        path[sizeof(LIB_PATH) - 1] = '/';
-        strcpy(&path[sizeof(LIB_PATH)], name->ptr);
-        strcpy(&path[sz], ".pl");
+        Buffer_append_nt(path, LIB_PATH);
+        Buffer_append_nt(path, "/");
+        Buffer_append_nt(path, name->ptr);
+        Buffer_append_nt(path, ".pl");
     }else{
-        path = Term_string(List_head(args[0]))->ptr;
+        Buffer* str = Term_string(List_head(args[0]));
+        Buffer_append_nt(path, str->ptr);
     }
-    load_file(path);
-    if(lib){
-        free(path);
-    }
-    enable_gc();
-    return true;
+    load_file(path->ptr);
+    Buffer_free(path);
+    FRAME_RETURN(bool, true);
 }
 
 Term* String_concat(Term* a, Term* b){
@@ -2451,12 +2456,9 @@ Term* parse_term_vars(char** str, HashTable* vars, char* end_chars){
 }
 
 Term* parse_term_partial(char** str){
-    HashTable* vars = HashTable_new(PARSE_VARS_HASHTABLE_SIZE);
-    disable_gc();
-    Term* term = parse_term_vars(str, vars, NULL);
-    enable_gc();
-    HashTable_free(vars);
-    return term;
+    FRAME_ENTER;
+    FRAME_LOCAL(vars) = Dict(PARSE_VARS_HASHTABLE_SIZE);
+    FRAME_RETURN(Term*, parse_term_vars(str, vars->data.dict, NULL));
 }
 
 Term* parse_term(char* str){
@@ -2472,11 +2474,11 @@ Term* parse_term(char* str){
 Term* parse_toplevel(char* str){
     FRAME_ENTER;
     char* pos = spaces(str);
-    disable_gc();
     FRAME_LOCAL(list) = Var(atom_underscore);
     FRAME_LOCAL(tail) = list;
+    FRAME_LOCAL(term) = NULL;
     for(; *pos; pos = spaces(pos)){
-        Term* term = parse_term_partial(&pos);
+        term = parse_term_partial(&pos);
         if(!term){
             FRAME_RETURN(Term*, NULL);
         }
@@ -2486,6 +2488,7 @@ Term* parse_toplevel(char* str){
         }
         pos++;
         Var_push(&tail, term);
+        SANITY_CHECK;
     }
     set_var(tail, Nil());
     FRAME_RETURN(Term*, list);
@@ -2502,42 +2505,29 @@ void add_prim_query(Term *query){
 }
 
 bool assertz(Term* term){
+    FRAME_ENTER_1(term);
     Term** args = Functor_get(term, atom_entails, 2);
     if(args){
-        Term* head = chase(args[0]);
+        FRAME_LOCAL(head) = chase(args[0]);
         if(head->type != FUNCTOR){
-            D_EVAL{
-                trace_term("assertz: not a functor", head);
-            }
-            return false;
+            D_EVAL{ trace_term("assertz: not a functor", head); }
+            FRAME_RETURN(bool, false);
         }
-        D_EVAL{
-            trace_term("regular assertz", term);
-        }
-        disable_gc();
         HashTable_append(root.globals, Spec(head->data.functor.atom, head->data.functor.size), term);
-        enable_gc();
-        return true;
+        FRAME_RETURN(bool, true);
     }
     args = Functor_get(term, atom_long_rarrow, 2);
     if(args){
-        Term* q = Functor1(atom_assertz_dcg, term);
+        FRAME_LOCAL(q) = Functor1(atom_assertz_dcg, term);
         if(evaluating){
-            D_EVAL{
-                trace_term("delayed dcg assertz", term);
-            }
             add_prim_query(q);
+            FRAME_RETURN(bool, true);
         }else{
-            D_EVAL{
-                trace_term("immediate dcg assertz", term);
-            }
-            return eval_query(q);
+            FRAME_RETURN(bool, eval_query(q));
         }
     }
-    disable_gc();
     HashTable_append(root.globals, Spec(term->data.functor.atom, term->data.functor.size), term);
-    enable_gc();
-    return true;
+    FRAME_RETURN(bool, true);
 }
 
 void eval_toplevel(Term* term){
@@ -2585,8 +2575,9 @@ Term* parse_file(char* path){
 
 void load_file(char* path){
     FRAME_ENTER;
-    FRAME_LOCAL(contents) = chase(parse_file(path));
-    guarantee(contents, "failed to parse file '%s'", path);
+    FRAME_LOCAL(contents) = parse_file(path);
+    guarantee(contents, "failed to parse file `%s'", path);
+    contents = chase(contents);
     for(; !Atom_eq(contents, atom_nil); contents = chase(List_tail(contents))){
         eval_toplevel(List_head(contents));
     }
@@ -2594,23 +2585,6 @@ void load_file(char* path){
 }
 
 void load_base(){
-    disable_gc();
-
-#define ADD_OP(prec, order, name) \
-    HashTable_append(root.ops, Atom(intern_nt(name)), Functor3(atom_op, Integer(prec), Atom(intern_nt(order)), Atom(intern_nt(name))))
-    ADD_OP(1200, "xfx", ":-");
-    ADD_OP(1200, "xfx", "-->");
-    ADD_OP(1200, "fx", ":-");
-    ADD_OP(1100, "xfy", ";");
-    ADD_OP(1000, "xfy", ",");
-    ADD_OP(700, "xfx", "=");
-    ADD_OP(700, "xfx", "=..");
-    ADD_OP(500, "yfx", "+");
-    ADD_OP(700, "xfx", "is");
-#undef ADD_OP
-
-    enable_gc();
-
     load_file(LIB_PATH "/base.pl");
 
     base_loaded = true;
