@@ -187,10 +187,11 @@ bool evaluating = false;
 #define debug(...) do{ int _debug_res = fprintf(stderr, __VA_ARGS__); guarantee_errno(_debug_res, "fprintf"); }while(0)
 
 #define FRAME_ENTER \
-    char use_FRAME_RETURN_or_FRAME_LEAVE_instead_of_return; \
-    const char* parent_frame_func = current_frame_func; \
-    current_frame_func = __func__; \
-    size_t current_c_frame_count = ++c_frame_count; \
+    ASSERT_CODE(\
+                char use_FRAME_RETURN_or_FRAME_LEAVE_instead_of_return; \
+                const char* parent_frame_func = current_frame_func; \
+                current_frame_func = __func__; \
+                size_t current_c_frame_count = ++c_frame_count; ) \
     size_t current_c_frame = next_c_term
 
 #define FRAME_ENTER_1(a) FRAME_ENTER; FRAME_TRACK_VAR(a)
@@ -207,17 +208,17 @@ bool evaluating = false;
     FRAME_TRACK_VAR(name); \
     name
 
-#define FRAME_LEAVE ENSURE_INSIDE_FRAME;     \
-    (void)use_FRAME_RETURN_or_FRAME_LEAVE_instead_of_return;   \
+#define FRAME_LEAVE ENSURE_INSIDE_FRAME; \
+    ASSERT_CODE((void)use_FRAME_RETURN_or_FRAME_LEAVE_instead_of_return;) \
     D_SANITY{ \
-        guarantee(                                              \
-                  current_c_frame <= next_c_term &&             \
-                  c_frame_count == current_c_frame_count,       \
+        guarantee( \
+                  current_c_frame <= next_c_term \
+                  ASSERT_CODE(&& c_frame_count == current_c_frame_count), \
                   "internal error: c frame mismatch: leaving %s after entering %s", __func__, current_frame_func); \
-    }                                                           \
-    current_frame_func = parent_frame_func; \
-    next_c_term = current_c_frame;                              \
-    --c_frame_count
+    } \
+    ASSERT_CODE(current_frame_func = parent_frame_func;) \
+    ASSERT_CODE(--c_frame_count;) \
+    next_c_term = current_c_frame \
 
 #define FRAME_RETURN(type, ret) type _frame_ret = ret; FRAME_LEAVE; return _frame_ret
 
