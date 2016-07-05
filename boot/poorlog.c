@@ -51,8 +51,10 @@ int kill(pid_t, int);
 
 #ifdef ISABLE_ASSERTS
 #define ASSERT_CODE(...)
+#define assert(...)
 #else
 #define ASSERT_CODE(...) __VA_ARGS__
+#define assert(p, ...) do{ if(!(p)){ fatal_error("assert failed `" #p "': " __VA_ARGS__); } }while(0)
 #endif
 
 typedef uint32_t hash_t;
@@ -111,6 +113,11 @@ typedef struct {
     size_t alloc_size;
 } Stream;
 
+enum render_flags_t {
+    RENDER_NO_CHASE,
+    RENDER_STRICT
+};
+
 #define MIN(a,b) ((a) < (b) ? a : b)
 #define MAX(a,b) ((a) < (b) ? b : a)
 
@@ -121,9 +128,9 @@ Term* parse_term_vars(char** str, HashTable* vars, char* end_char);
 bool assertz(Term* term);
 Term** HashTable_get(HashTable* table, Term* key);
 Term* HashTable_find(HashTable* table, Term* key);
-void fatal_error(char* format, ...);
+void fatal_error_(const char* func, char* format, ...);
 void load_file(char* path);
-void Term_render(Term* term, bool show_vars, renderer_t write, void* data);
+void Term_render(Term* term, int render_flags, renderer_t write, void* data);
 void sanity_check_all();
 void disable_gc();
 void enable_gc();
@@ -182,8 +189,9 @@ bool always = true;
 
 bool evaluating = false;
 
-#define guarantee(p, ...) do{ if(!(p)){ fatal_error(__VA_ARGS__); } }while(0)
-#define guarantee_errno(p, f) guarantee(p, "%s failed: %s", f, strerror(errno))
+#define fatal_error(...) fatal_error_(__func__, __VA_ARGS__)
+#define guarantee(p, ...) do{ if(!(p)){ fatal_error("guarantee failed `" #p "': " __VA_ARGS__); } }while(0)
+#define guarantee_errno(p, f) guarantee(p, "%s: %s", f, strerror(errno))
 #define debug(...) do{ int _debug_res = fprintf(stderr, __VA_ARGS__); guarantee_errno(_debug_res, "fprintf"); }while(0)
 
 #define FRAME_ENTER \
@@ -267,10 +275,10 @@ void* system_realloc(void* p, size_t size){
     return ret;
 }
 
-void fatal_error(char* format, ...){
+void fatal_error_(const char* func, char* format, ...){
     va_list argptr;
     va_start(argptr, format);
-    int res = fprintf(stderr, "fatal error: ");
+    int res = fprintf(stderr, "fatal error in %s: ", func);
     guarantee_errno(res >= 0, "fprintf");
     res = vfprintf(stderr, format, argptr);
     guarantee_errno(res >= 0, "vfprintf");
@@ -516,6 +524,14 @@ Term* Pool_add_term_expand(Pool* p){
      return term;
 }
 
+void HashTable_each_list(HashTable* table, term_iterator_t f, void* data){
+    for(size_t i = 0; i < table->size; i++){
+        if(table->table[i]){
+            f(&table->table[i], data);
+        }
+    }
+}
+
 void Pool_pour(Term** term, Pool *p){
     if((*term)->type == MOVED){
         *term = (*term)->data.moved_to;
@@ -534,9 +550,11 @@ void Pool_pour(Term** term, Pool *p){
                 Pool_pour(&new->data.functor.args[i], p);
             }
             break;
+        case DICT:
+            HashTable_each_list(new->data.dict, (term_iterator_t)Pool_pour, (void*)p);
+            break;
         case INTEGER:
         case STRING:
-        case DICT:
             break;
         case MOVED:
             UNREACHABLE;
@@ -544,23 +562,15 @@ void Pool_pour(Term** term, Pool *p){
     }
 }
 
-void each_live_table(HashTable* table, term_iterator_t f, void* data){
-    for(size_t i = 0; i < table->size; i++){
-        if(table->table[i]){
-            f(&table->table[i], data);
-        }
-    }
-}
-
-void each_live_all(term_iterator_t f, void* data){
-    each_live_table(root.globals, f, data);
-    each_live_table(root.ops, f, data);
-    each_live_table(root.interned, f, data);
-    each_live_table(root.atom_names, f, data);
+void each_root(term_iterator_t f, void* data){
+    HashTable_each_list(root.globals, f, data);
+    HashTable_each_list(root.ops, f, data);
+    HashTable_each_list(root.interned, f, data);
+    HashTable_each_list(root.atom_names, f, data);
     if(root.stack){ f(&root.stack, data); }
     if(root.query){ f(&root.query, data); }
     if(root.next_query){ f(&root.next_query, data); }
-    if(root.next_query){ f(&root.prim_queries, data); }
+    if(root.prim_queries){ f(&root.prim_queries, data); }
     for(size_t i = 0; i < next_c_term; i++){
         if(root.c_terms[i]){
             f(root.c_terms[i], data);
@@ -572,7 +582,7 @@ void gc(Pool** p){
     D_GC{ trace_pool_info("start gc", *p); }
     Pool *new = Pool_new();
     D_GC{ trace_pool_info("new pool", new); }
-    each_live_all((term_iterator_t)Pool_pour, new);
+    each_root((term_iterator_t)Pool_pour, new);
     Pool_free(*p);
     Pool_expand(new);
     *p = new;
@@ -602,14 +612,14 @@ Term* Pool_add_term_gc(Pool** p){
 void do_nothing(){ }
 
 void sanity_check_term(Term** term, ...){
-    Term_render(*term, false, do_nothing, NULL);
+    Term_render(*term, RENDER_STRICT, do_nothing, NULL);
 }
 
 void sanity_check_all(){
     static bool checking = false;
     if(checking) return;
     checking = true;
-    each_live_all((term_iterator_t)sanity_check_term, NULL);
+    each_root((term_iterator_t)sanity_check_term, NULL);
     checking = false;
 }
 
@@ -880,21 +890,27 @@ Buffer* atom_to_string(atom_t atom){
     return &atom_to_String(atom)->data.string;
 }
 
-void Term_render(Term* term, bool show_vars, renderer_t write, void* data){
+void Term_render(Term* term, int render_flags, renderer_t write, void* data){
     if(!term){
+        if(render_flags & RENDER_STRICT){
+            fatal_error("null term");
+        }
         write(data, "?null?", 5);
         return;
     }
-    if(!show_vars){
+    if(!(render_flags & RENDER_NO_CHASE)){
         term = chase(term);
     }
     switch(term->type){
     case MOVED:
-        write(data, "_MOVED", 6);
+        if(render_flags & RENDER_STRICT){
+            fatal_error("encountered garbage collected term");
+        }
+        write(data, "?moved?", 7);
         break;
     case VAR:
         if(term->data.var.ref != term){
-            Term_render(term->data.var.ref, show_vars, write, data);
+            Term_render(term->data.var.ref, render_flags, write, data);
         }else{
             Buffer* name = atom_to_string(term->data.var.name);
             write(data, name->ptr, name->end);
@@ -917,7 +933,7 @@ void Term_render(Term* term, bool show_vars, renderer_t write, void* data){
         if(term->data.functor.size){
             write(data, "(", 1);
             for(int i = 0; i < term->data.functor.size; i++){
-                Term_render(term->data.functor.args[i], show_vars, write, data);
+                Term_render(term->data.functor.args[i], render_flags, write, data);
                 if(i + 1 < term->data.functor.size){
                     write(data, ", ", 2);
                 }
@@ -928,13 +944,16 @@ void Term_render(Term* term, bool show_vars, renderer_t write, void* data){
     case DICT:
         write(data, "?dict?", 6);
     default:
+        if(render_flags & RENDER_STRICT){
+            fatal_error("invalid term type");
+        }
         write(data, "?invalid?", 8);
     }
 }
 
-Buffer* Term_show(Term* term, bool show_vars){
+Buffer* Term_show(Term* term, int render_flags){
     Buffer* buffer = Buffer_empty(0);
-    Term_render(term, show_vars, (renderer_t)Buffer_append, buffer);
+    Term_render(term, render_flags, (renderer_t)Buffer_append, buffer);
     Buffer_shrink(buffer);
     return buffer;
 }
@@ -969,7 +988,7 @@ void trace_term(char* format, Term* term, ...){
     va_list argptr;
     va_start(argptr, term);
     vfprintf(stderr, format, argptr);
-    Buffer* buffer = Term_show(term, true);
+    Buffer* buffer = Term_show(term, 0);
     debug(": %s\n", short_snippet(buffer->ptr, buf, sizeof buf));
     Buffer_free(buffer);
     va_end(argptr);
@@ -1001,7 +1020,7 @@ Term* List_head(Term* list){
     Term** args = Functor_get(list, atom_cons, 2);
     if(!args){
         trace_term("list", list);
-        fatal_error("head: expected non-empty list");
+        fatal_error("expected non-empty list");
     }
     return args[0];
 }
@@ -1010,7 +1029,7 @@ Term* List_tail(Term* list){
     Term** args = Functor_get(list, atom_cons, 2);
     if(!args){
         trace_term("list", list);
-        fatal_error("tail: expected non-empty list");
+        fatal_error("expected non-empty list");
     }
     return args[1];
 }
@@ -1137,7 +1156,7 @@ void render_fprintf(FILE* out, char* str, size_t size){
 }
 
 void Term_print(Term* term){
-    Term_render(term, false, (renderer_t)render_fprintf, stdout);
+    Term_render(term, 0, (renderer_t)render_fprintf, stdout);
 }
 
 bool prim_print(Term** args){
@@ -1705,12 +1724,13 @@ bool prim_cons(Term** args){
     return true;
 }
 
-Term* Var_push(Term* var, Term* term){
-    FRAME_ENTER_2(var, term);
+void Var_push(Term** var, Term* term){
+    FRAME_ENTER_1(term);
     FRAME_LOCAL(ret) = Var(atom_underscore);
-    bool ok = unify(var, Functor2(atom_cons, term, ret));
+    bool ok = unify(*var, Functor2(atom_cons, term, ret));
     guarantee(ok, "internal error: failed to unify");
-    FRAME_RETURN(Term*, ret);
+    *var = ret;
+    FRAME_LEAVE;
 }
 
 Term* String_concat(Term* a, Term* b){
@@ -1738,7 +1758,7 @@ Term* String_concat(Term* a, Term* b){
             if(head->type == INTEGER ||
                head->type == STRING ||
                is_Atom(head)){
-                tail = Var_push(tail, head);
+                Var_push(&tail, head);
             }else{
                 fatal_error("invalid string");
             }
@@ -1746,7 +1766,7 @@ Term* String_concat(Term* a, Term* b){
         }else if(Atom_eq(a, atom_nil)){
             break;
         }else if(a->type == STRING || is_Atom(a)){
-            tail = Var_push(tail, a);
+            Var_push(&tail, a);
             break;
         }else{
             fatal_error("invalid string");
@@ -1903,6 +1923,7 @@ bool prim_string_concat(Term** args){
 }
 
 bool prim_string_first(Term** args){
+    FRAME_ENTER;
     Term* str = chase(args[0]);
     Term* chr = chase(args[1]);
     if(chr->type == VAR){
@@ -1910,21 +1931,16 @@ bool prim_string_first(Term** args){
         char c;
         bool res = String_next_char(&str, &n, &c);
         guarantee(res, "string_first: empty string");
-        Term** cs = keep(String(&c, 1));
-        bool ret = unify_strings(chr, *cs);
-        unkeep(cs);
-        return ret;
+        FRAME_RETURN(bool, unify_strings(chr, String(&c, 1)));
     }else{
         Term* s = Term_String(chr);
         guarantee(s->data.string.end == 1, "string_first: first argument is not a singleton");
-        Term** var = keep(Var(atom_underscore));
+        FRAME_LOCAL(var) = Var(atom_underscore);
         Term* concat_args[3];
         concat_args[0] = chr;
-        concat_args[1] = *var;
+        concat_args[1] = var;
         concat_args[2] = str;
-        bool ret = prim_string_concat(concat_args);
-        unkeep(var);
-        return ret;
+        FRAME_RETURN(bool, prim_string_concat(concat_args));
     }
 }
 
@@ -2449,31 +2465,26 @@ Term* parse_term(char* str){
 }
 
 Term* parse_toplevel(char* str){
+    FRAME_ENTER;
     char* pos = spaces(str);
     disable_gc();
-    Term* list = NULL;
-    Term** rest = &list;
+    FRAME_LOCAL(list) = Var(atom_underscore);
+    FRAME_LOCAL(tail) = list;
     for(; *pos; pos = spaces(pos)){
         Term* term = parse_term_partial(&pos);
         if(!term){
-            enable_gc();
-            return NULL;
+            FRAME_RETURN(Term*, NULL);
         }
         pos = spaces(pos);
         if(*pos != '.'){
-            enable_gc();
-            return NULL;
+            FRAME_RETURN(Term*, NULL);
         }
         pos++;
-        *rest = Functor2(atom_cons, term, NULL);
-        rest = &(*rest)->data.functor.args[1];
+        Var_push(&tail, term);
     }
-    *rest = Atom(atom_nil);
-    Term** tmp = keep(list);
-    enable_gc();
-    list = *tmp;
-    unkeep(tmp);
-    return list;
+    bool res = unify(tail, Atom(atom_nil));
+    assert(res, "unify failed");
+    FRAME_RETURN(Term*, list);
 }
 
 void add_prim_query (Term *query){
@@ -2559,9 +2570,9 @@ Term* parse_file(char* path){
 }
 
 void load_file(char* path){
-    Term** contents = keep(parse_file(path));
+    Term** contents = keep(chase(parse_file(path)));
     guarantee(*contents, "failed to parse file '%s'", path);
-    for(; !Atom_eq(*contents, atom_nil); *contents = List_tail(*contents)){
+    for(; !Atom_eq(*contents, atom_nil); *contents = chase(List_tail(*contents))){
         eval_toplevel(List_head(*contents));
     }
     unkeep(contents);
@@ -2639,7 +2650,7 @@ void eval_interactive(Term* term){
             printf("yep.\n");
         }else{
             for(; !Atom_eq(*vars, atom_nil); *vars = List_tail(*vars)){
-                Buffer* buffer = Term_show(List_head(*vars), false);
+                Buffer* buffer = Term_show(List_head(*vars), RENDER_NO_CHASE);
                 printf("%s.\n", buffer->ptr);
                 Buffer_free(buffer);
             }
