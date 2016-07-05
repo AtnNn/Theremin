@@ -232,8 +232,10 @@ bool always = true;
     size_t current_c_frame = next_c_term
 
 #define FRAME_ENTER_1(a) FRAME_ENTER; FRAME_TRACK_VAR(a)
-#define FRAME_ENTER_2(a, b) FRAME_ENTER; FRAME_TRACK_VAR(a); FRAME_TRACK_VAR(b)
-#define FRAME_ENTER_3(a, b, c) FRAME_ENTER; FRAME_TRACK_VAR(a); FRAME_TRACK_VAR(b); FRAME_TRACK_VAR(c)
+#define FRAME_ENTER_2(a, b) FRAME_ENTER_1(a); FRAME_TRACK_VAR(b)
+#define FRAME_ENTER_3(a, b, c) FRAME_ENTER_2(a, b); FRAME_TRACK_VAR(c)
+#define FRAME_ENTER_4(a, b, c, d) FRAME_ENTER_3(a, b, c); FRAME_TRACK_VAR(d)
+#define FRAME_ENTER_5(a, b, c, d, e) FRAME_ENTER_4(a, b, c, d); FRAME_TRACK_VAR(e)
 
 #define ENSURE_INSIDE_FRAME (void)current_c_frame
 
@@ -707,49 +709,54 @@ Term* Functor_unsafe(atom_t atom, functor_size_t size){
 }
 
 void Functor_set_arg(Term* term, functor_size_t n, Term* arg){
-    if(term->type != FUNCTOR) fatal_error("Functor_set_arg: not a functor");
-    if(term->data.functor.size <= n) fatal_error("Functor_set_arg: too few arguments");
+    guarantee(term->type == FUNCTOR, "Functor_set_arg: not a functor");
+    guarantee(term->data.functor.size > n, "Functor_set_arg: too few arguments");
     term->data.functor.args[n] = arg;
 }
 
 Term* Functor1(atom_t atom, Term* a){
+    FRAME_ENTER_1(a);
     Term* term = Functor_unsafe(atom, 1);
     Functor_set_arg(term, 0, a);
-    return term;
+    FRAME_RETURN(Term*, term);
 }
 
 Term* Functor2(atom_t atom, Term* a, Term* b){
+    FRAME_ENTER_2(a, b);
     Term* term = Functor_unsafe(atom, 2);
     Functor_set_arg(term, 0, a);
     Functor_set_arg(term, 1, b);
-    return term;
+    FRAME_RETURN(Term*, term);
 }
 
 Term* Functor3(atom_t atom, Term* a, Term* b, Term* c){
+    FRAME_ENTER_3(a, b, c);
     Term* term = Functor_unsafe(atom, 3);
     Functor_set_arg(term, 0, a);
     Functor_set_arg(term, 1, b);
     Functor_set_arg(term, 2, c);
-    return term;
+    FRAME_RETURN(Term*, term);
 }
 
 Term* Functor4(atom_t atom, Term* a, Term* b, Term* c, Term* d){
+    FRAME_ENTER_4(a, b, c, d);
     Term* term = Functor_unsafe(atom, 4);
     Functor_set_arg(term, 0, a);
     Functor_set_arg(term, 1, b);
     Functor_set_arg(term, 2, c);
     Functor_set_arg(term, 3, d);
-    return term;
+    FRAME_RETURN(Term*, term);
 }
 
 Term* Functor5(atom_t atom, Term* a, Term* b, Term* c, Term* d, Term* e){
+    FRAME_ENTER_5(a, b, c, d, e);
     Term* term = Functor_unsafe(atom, 5);
     Functor_set_arg(term, 0, a);
     Functor_set_arg(term, 1, b);
     Functor_set_arg(term, 2, c);
     Functor_set_arg(term, 3, d);
     Functor_set_arg(term, 4, e);
-    return term;
+    FRAME_RETURN(Term*, term);
 }
 
 Term* Var(atom_t name){
@@ -819,24 +826,24 @@ hash_t hash(Term* term){
 }
 
 atom_t intern(Term* str){
+    FRAME_ENTER_1(str);
+    FRAME_LOCAL(tatom) = Atom(next_free_atom);
     Term** term = HashTable_get(root.interned, str);
     if(*term){
-        if(!is_Atom(*term)){
-            fatal_error("interned term is not an atom");
-        }
+        guarantee(is_Atom(*term), "interned term is not an atom");
         D_ATOM{
-            debug("already interned %s as %lu\n", str->data.string.ptr, (*term)->data.functor.atom);
+            debug("already interned `%s' as %lu\n", str->data.string.ptr, (*term)->data.functor.atom);
         }
-        return (*term)->data.functor.atom;
+        FRAME_RETURN(atom_t, (*term)->data.functor.atom);
     }
     atom_t atom = next_free_atom++;
-    *term = Atom(atom);
-    Term** rev = HashTable_get(root.atom_names, *term);
+    *term = tatom;
+    Term** rev = HashTable_get(root.atom_names, tatom);
     *rev = str;
     D_ATOM{
         debug("interning %s as %lu\n", str->data.string.ptr, atom);
     }
-    return atom;
+    FRAME_RETURN(atom_t, atom);
 }
 
 atom_t intern_nt(char* string){
@@ -1261,24 +1268,38 @@ bool Rule_spec(Term* term, atom_t* atom, int* size){
 }
 
 void add_undo_var(Term* stack, Term* var){
+    FRAME_ENTER_2(stack, var);
     Term** args = Functor_get(stack, atom_frame, 3);
-    if(!args) return;
-    Term** undo_vars = &args[1];
-    if(!Atom_eq(*undo_vars, atom_drop)){
-        *undo_vars = Functor2(atom_cons, var, *undo_vars);
+    if(!args){
+        FRAME_LEAVE;
+        return;
     }
+    FRAME_LOCAL(undo_vars) = args[1];
+    if(!Atom_eq(undo_vars, atom_drop)){
+        stack->data.functor.args[1] = Functor2(atom_cons, var, undo_vars);
+    }
+    FRAME_LEAVE;
 }
 
 void add_undo_vars(Term* stack, Term* vars){
-    if(Atom_eq(vars, atom_drop)) return;
-    Term** args = Functor_get(stack, atom_frame, 3);
-    if(!args) return;
-    Term** undo_vars = &args[1];
-    if(Atom_eq(*undo_vars, atom_drop)) return;
-    for(; !Atom_eq(vars, atom_nil); vars = List_tail(vars)){
-        Term* var = List_head(vars);
-        *undo_vars = Functor2(atom_cons, var, *undo_vars);
+    FRAME_ENTER_2(stack, vars);
+    if(Atom_eq(vars, atom_drop)){
+        FRAME_LEAVE;
+        return;
     }
+    Term** args = Functor_get(stack, atom_frame, 3);
+    if(!args){
+        FRAME_LEAVE;
+        return;
+    }
+    if(Atom_eq(args[1], atom_drop)){
+        FRAME_LEAVE;
+        return;
+    }
+    for(; !Atom_eq(vars, atom_nil); vars = List_tail(vars)){
+        stack->data.functor.args[1] = Functor2(atom_cons, List_head(vars), stack->data.functor.args[1]);
+    }
+    FRAME_LEAVE;
 }
 
 void reset_undo_vars(Term* vars){
