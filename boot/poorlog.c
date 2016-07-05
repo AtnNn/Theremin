@@ -980,14 +980,14 @@ bool Functor_render_op(Term* term, int render_flags, int left_prec, int right_pr
     Term** cons = Functor_get(term, atom_cons, 2);
     if(cons){
         FRAME_LOCAL(car) = cons[0];
-        FRAME_LOCAL(cdr) = cons[1];
+        FRAME_LOCAL(cdr) = chase(cons[1]);
         write(data, "[", 1);
         while(true){
             Term_render(car, render_flags, def_outer_prec, def_outer_prec, true, write, data);
             Term** cons = Functor_get(cdr, atom_cons, 2);
             if(cons){
                 car = cons[0];
-                cdr = cons[1];
+                cdr = chase(cons[1]);
                 write(data, ", ", 2);
                 continue;
             }else if(Atom_eq(cdr, atom_nil)){
