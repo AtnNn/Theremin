@@ -136,6 +136,7 @@ struct roots_t {
 atom_t next_free_atom;
 size_t next_c_term = 0;
 size_t c_frame_count = 0;
+const char* current_frame_func;
 
 int gc_disable_count = 0;
 bool would_gc = false;
@@ -172,34 +173,40 @@ bool evaluating = false;
 #define guarantee_errno(p, f) guarantee(p, "%s failed: %s", f, strerror(errno))
 #define debug(...) do{ int _debug_res = fprintf(stderr, __VA_ARGS__); guarantee_errno(_debug_res, "fprintf"); }while(0)
 
-#define INIT_FRAME \
+#define FRAME_ENTER \
+    char use_FRAME_RETURN_or_FRAME_LEAVE_instead_of_return; \
+    const char* parent_frame_func = current_frame_func; \
+    current_frame_func = __func__; \
     size_t current_c_frame_count = ++c_frame_count; \
     size_t current_c_frame = next_c_term
 
-#define INIT_FRAME_1(a) INIT_FRAME; TRACK_VAR(a)
-#define INIT_FRAME_2(a, b) INIT_FRAME; TRACK_VAR(a); TRACK_VAR(b)
-#define INIT_FRAME_3(a, b, c) INIT_FRAME; TRACK_VAR(a); TRACK_VAR(b); TRACK_VAR(c)
+#define FRAME_ENTER_1(a) FRAME_ENTER; FRAME_TRACK_VAR(a)
+#define FRAME_ENTER_2(a, b) FRAME_ENTER; FRAME_TRACK_VAR(a); FRAME_TRACK_VAR(b)
+#define FRAME_ENTER_3(a, b, c) FRAME_ENTER; FRAME_TRACK_VAR(a); FRAME_TRACK_VAR(b); FRAME_TRACK_VAR(c)
 
 #define ENSURE_INSIDE_FRAME (void)current_c_frame
 
-#define TRACK_VAR(name) ENSURE_INSIDE_FRAME; \
+#define FRAME_TRACK_VAR(name) ENSURE_INSIDE_FRAME; \
     root.c_terms[next_c_term++] = &(name)
 
-#define LOCAL(name) ENSURE_INSIDE_FRAME; \
+#define FRAME_LOCAL(name) ENSURE_INSIDE_FRAME; \
     Term* name = NULL; \
-    TRACK_VAR(name); \
+    FRAME_TRACK_VAR(name); \
     name
 
-#define FRAME_RETURN ENSURE_INSIDE_FRAME; \
+#define FRAME_LEAVE ENSURE_INSIDE_FRAME;     \
+    (void)use_FRAME_RETURN_or_FRAME_LEAVE_instead_of_return;   \
     D_SANITY{ \
         guarantee(                                              \
                   current_c_frame <= next_c_term &&             \
                   c_frame_count == current_c_frame_count,       \
-                  "internal error: c frame mismatch");          \
+                  "internal error: c frame mismatch: leaving %s after entering %s", __func__, current_frame_func); \
     }                                                           \
+    current_frame_func = parent_frame_func; \
     next_c_term = current_c_frame;                              \
-    --c_frame_count;                                            \
-    return
+    --c_frame_count
+
+#define FRAME_RETURN(type, ret) type _frame_ret = ret; FRAME_LEAVE; return _frame_ret
 
 struct keep_info_t {
     Term* term;
@@ -213,7 +220,7 @@ Term** keep(Term* t){
     // debug("keep i %zu f %zu\n", i, next_c_term);
     keeps[i].frame_pos = next_c_term;
     keeps[i].term = t;
-    TRACK_VAR(keeps[i].term);
+    FRAME_TRACK_VAR(keeps[i].term);
     return &keeps[i].term;
 }
 
@@ -803,15 +810,14 @@ atom_t intern(Term* str){
 }
 
 atom_t intern_nt(char* string){
-    INIT_FRAME;
-    LOCAL(s) = String_nt(string);
-    atom_t ret = intern(s);
-    FRAME_RETURN ret;
+    FRAME_ENTER;
+    FRAME_LOCAL(s) = String_nt(string);
+    FRAME_RETURN(atom_t, intern(s));
 }
 
 void intern_prim(char* string, atom_t atom){
-    INIT_FRAME;
-    LOCAL(str) = String_nt(string);
+    FRAME_ENTER;
+    FRAME_LOCAL(str) = String_nt(string);
     Term** term = HashTable_get(root.interned, str);
     if(*term){
         fatal_error("prim '%s' already exists", string);
@@ -822,15 +828,14 @@ void intern_prim(char* string, atom_t atom){
     D_ATOM{
         debug("interning primitve %s as %lu\n", string, atom);
     }
-    FRAME_RETURN;
+    FRAME_LEAVE;
 }
 
 Term* Spec(atom_t atom, int size){
-    INIT_FRAME;
-    LOCAL(tatom) = Atom(atom);
-    LOCAL(tsize) = Integer(size);
-    Term* ret = Functor2(atom_slash, tatom, tsize);
-    FRAME_RETURN ret;
+    FRAME_ENTER;
+    FRAME_LOCAL(tatom) = Atom(atom);
+    FRAME_LOCAL(tsize) = Integer(size);
+    FRAME_RETURN(Term*, Functor2(atom_slash, tatom, tsize));
 }
 
 Term* chase(Term* term){
@@ -1038,7 +1043,7 @@ bool Term_exact_eq(Term* a, Term* b){
 }
 
 Term** Assoc_get(Term** assoc, Term* key){
-    INIT_FRAME_1(key);
+    FRAME_ENTER_1(key);
     for(Term* list = *assoc; !Atom_eq(list, atom_nil); list = List_tail(list)){
         Term** args = Functor_get(List_head(list), atom_colon, 2);
         if(!args) fatal_error("Not an assoc list");
@@ -1048,12 +1053,12 @@ Term** Assoc_get(Term** assoc, Term* key){
                     trace_term("hash collision", key);
                 }
             }
-            FRAME_RETURN &args[1];
+            FRAME_RETURN(Term**, &args[1]);
         }
     }
-    LOCAL(pair) = Functor2(atom_colon, key, NULL);
+    FRAME_LOCAL(pair) = Functor2(atom_colon, key, NULL);
     *assoc = Functor2(atom_cons, pair, *assoc);
-    FRAME_RETURN &pair->data.functor.args[1];
+    FRAME_RETURN(Term**, &pair->data.functor.args[1]);
 }
 
 Term* Assoc_find(Term* assoc, Term* key){
@@ -1182,10 +1187,9 @@ Term* Map(size_t size){
 }
 
 Term* Term_copy(Term* term){
-    INIT_FRAME_1(term);
-    LOCAL(vars) = Map(COLLISION_HASHTABLE_SIZE);
-    Term* copy = Term_copy_rec(term, vars->data.dict);
-    FRAME_RETURN copy;
+    FRAME_ENTER_1(term);
+    FRAME_LOCAL(vars) = Map(COLLISION_HASHTABLE_SIZE);
+    FRAME_RETURN(Term*, Term_copy_rec(term, vars->data.dict));
 }
 
 bool Rule_spec(Term* term, atom_t* atom, int* size){
@@ -1232,15 +1236,15 @@ void reset_undo_vars(Term* vars){
 }
 
 bool stack_push(atom_t atom, functor_size_t size, Term* term){
-    INIT_FRAME_1(term);
-    LOCAL(spec) = Spec(atom, size);
+    FRAME_ENTER_1(term);
+    FRAME_LOCAL(spec) = Spec(atom, size);
     Term* rules = HashTable_find(root.globals, spec);
     if(!rules){
-        FRAME_RETURN error("No such predicate '%s'/%u", atom_to_string(atom)->ptr, size);
+        FRAME_RETURN(bool, error("No such predicate '%s'/%u", atom_to_string(atom)->ptr, size));
     }
-    LOCAL(branches) = Atom(atom_nil);
-    LOCAL(head) = Atom(atom_nil);
-    LOCAL(branch) = Atom(atom_nil);
+    FRAME_LOCAL(branches) = Atom(atom_nil);
+    FRAME_LOCAL(head) = Atom(atom_nil);
+    FRAME_LOCAL(branch) = Atom(atom_nil);
     for(; !Atom_eq(rules, atom_nil); rules = List_tail(rules)){
         head = Term_copy(List_head(rules));
         Term** args = Functor_get(head, atom_entails, 2);
@@ -1255,11 +1259,11 @@ bool stack_push(atom_t atom, functor_size_t size, Term* term){
         branches = Functor2(atom_cons, branch, branches);
     }
     if(Atom_eq(branches, atom_nil)){
-        FRAME_RETURN error("No rules for predicate '%s/%u'", atom_to_string(atom), size);
+        FRAME_RETURN(bool, error("No rules for predicate '%s/%u'", atom_to_string(atom), size));
     }
     root.stack = Functor3(atom_frame, branches, Atom(atom_nil), root.stack);
     root.next_query = NULL;
-    FRAME_RETURN true;
+    FRAME_RETURN(bool, true);
 }
 
 bool stack_next(bool success){
@@ -1357,13 +1361,6 @@ bool unify(Term* a, Term* b){
     UNREACHABLE;
 }
 
-bool unify_var_unkept(Term* var, Term* unkept){
-    Term** term = keep(unkept);
-    bool ret = unify(var, *term);
-    unkeep(term);
-    return ret;
-}
-
 integer_t eval_math(Term* expr){
     expr = chase(expr);
     D_EVAL{ trace_term("eval_math", expr); }
@@ -1408,7 +1405,7 @@ bool prim_assertz(Term** args){
 }
 
 bool prim_is(Term** args) {
-    return unify_var_unkept(args[0], Integer(eval_math(chase(args[1]))));
+    return unify(args[0], Integer(eval_math(chase(args[1]))));
 }
 
 bool prim_univ(Term** args){
@@ -1556,10 +1553,10 @@ bool prim_process_create(Term** args){
     int input_stream, output_stream, error_stream, pid;
     bool ret =
         process_create(command_path, command_args, &input_stream, &output_stream, &error_stream, &pid) &&
-        unify_var_unkept(args[2], Integer(input_stream)) &&
-        unify_var_unkept(args[3], Integer(output_stream)) &&
-        unify_var_unkept(args[4], Integer(error_stream)) &&
-        unify_var_unkept(args[5], Integer(pid));
+        unify(args[2], Integer(input_stream)) &&
+        unify(args[3], Integer(output_stream)) &&
+        unify(args[4], Integer(error_stream)) &&
+        unify(args[5], Integer(pid));
     enable_gc();
     return ret;
 }
@@ -1601,11 +1598,11 @@ bool prim_read_string(Term** args){
     Stream* stream = Stream_get(stream_id);
     guarantee(max > 0, "invalid argument to read_string");
     if(stream->size > (size_t)max){
-        bool ret = unify_var_unkept(args[2], String(stream->buf + stream->pos, max));
+        bool ret = unify(args[2], String(stream->buf + stream->pos, max));
         stream->pos += max;
         return ret;
     }else if(stream->size > 0){
-        bool ret = unify_var_unkept(args[2], String(stream->buf + stream->pos, stream->size));
+        bool ret = unify(args[2], String(stream->buf + stream->pos, stream->size));
         stream->pos = 0;
         stream->size = 0;
         free(stream->buf);
@@ -1615,9 +1612,9 @@ bool prim_read_string(Term** args){
     }else{
         ssize_t res = read(stream->fd, buf, max);
         if(res == 0){
-            return unify_var_unkept(args[2], Atom(atom_eof));
+            return unify(args[2], Atom(atom_eof));
         }else if(res >= 1){
-            return unify_var_unkept(args[2], String(buf, res));
+            return unify(args[2], String(buf, res));
         }else{
             return error("warning: read failed: %s\n", strerror(errno));
         }
@@ -1635,7 +1632,7 @@ bool prim_string_codes(Term** args){
         for(Term* list = codes; !Atom_eq(list, atom_nil); list = List_tail(list)){
             term->data.string.ptr[n++] = Term_integer(List_head(list));
         }
-        bool ret = unify_var_unkept(string, term);
+        bool ret = unify(string, term);
         return ret;
     }else{
         disable_gc();
@@ -1658,10 +1655,10 @@ bool prim_atom_string(Term** args){
     Term* string = chase(args[1]);
     if(is_Atom(atom)){
         Term* s = atom_to_String(atom->data.functor.atom);
-        bool ret = unify_var_unkept(string, s);
+        bool ret = unify(string, s);
         return ret;
     }else if(string->type == STRING){
-        bool ret = unify_var_unkept(atom, Atom(intern(string)));
+        bool ret = unify(atom, Atom(intern(string)));
         return ret;
     }else{
         fatal_error("invalid arguments to atom_string");
@@ -1694,13 +1691,15 @@ bool prim_cons(Term** args){
 }
 
 Term* Var_push(Term* var, Term* term){
-    Term** ret = keep(Var(atom_underscore));
-    bool ok = unify(var, Functor2(atom_cons, term, *ret));
+    FRAME_ENTER_2(var, term);
+    FRAME_LOCAL(ret) = Var(atom_underscore);
+    bool ok = unify(var, Functor2(atom_cons, term, ret));
     guarantee(ok, "internal error: failed to unify");
-    return unkeep(ret);
+    FRAME_RETURN(Term*, ret);
 }
 
 Term* String_concat(Term* a, Term* b){
+    FRAME_ENTER_2(a, b);
     D_STRING{
         trace_term("concat a", a);
         trace_term("concat b", b);
@@ -1709,14 +1708,14 @@ Term* String_concat(Term* a, Term* b){
     b = chase(b);
     if(Atom_eq(a, atom_nil)){
         D_STRING{ debug("concat ret b"); }
-        return b;
+        FRAME_RETURN(Term*, b);
     }
     if(a->type == STRING || is_Atom(a)){
         D_STRING{ debug("concat ret cons(a,b)\n"); }
-        return Functor2(atom_cons, a, b);
+        FRAME_RETURN(Term*, Functor2(atom_cons, a, b));
     }
-    Term** tail = keep(Var(atom_underscore));
-    Term** out = keep(*tail);
+    FRAME_LOCAL(tail) = Var(atom_underscore);
+    FRAME_LOCAL(out) = tail;
     while(true){
         Term** args = Functor_get(a, atom_cons, 2);
         Term* head = chase(args[0]);
@@ -1724,7 +1723,7 @@ Term* String_concat(Term* a, Term* b){
             if(head->type == INTEGER ||
                head->type == STRING ||
                is_Atom(head)){
-                *tail = Var_push(*tail, head);
+                tail = Var_push(tail, head);
             }else{
                 fatal_error("invalid string");
             }
@@ -1732,17 +1731,16 @@ Term* String_concat(Term* a, Term* b){
         }else if(Atom_eq(a, atom_nil)){
             break;
         }else if(a->type == STRING || is_Atom(a)){
-            *tail = Var_push(*tail, a);
+            tail = Var_push(tail, a);
             break;
         }else{
             fatal_error("invalid string");
         }
     }
-    bool ok = unify(b, *tail);
+    bool ok = unify(b, tail);
     guarantee(ok, "internal error: failed to unify string");
-    unkeep(tail);
-    D_STRING{ trace_term("concat ret", *out); }
-    return unkeep(out);
+    D_STRING{ trace_term("concat ret", out); }
+    FRAME_RETURN(Term*, out);
 }
 
 bool String_next_char(Term** str, size_t* n, char* out){
@@ -1807,27 +1805,26 @@ bool String_next_char(Term** str, size_t* n, char* out){
 }
 
 Term* String_after(Term* str, size_t n){
+    FRAME_ENTER_1(str);
     if(n == 0){
-        return str;
+        FRAME_RETURN(Term*, str);
     }
     if(str->type == STRING || is_Atom(str)){
         Buffer* buf = Term_string(str);
         guarantee(buf->end >= n, "internal error: string too short");
-        return String(&buf->ptr[n], buf->end - n);
+        FRAME_RETURN(Term*, String(&buf->ptr[n], buf->end - n));
     }
     Term** args = Functor_get(str, atom_cons, 2);
     Term* head = chase(args[0]);
     if(head->type == STRING || is_Atom(head)){
-        Term** part = keep(String_after(head, n));
-        Term* ret = Functor2(atom_cons, *part, args[1]);
-        unkeep(part);
-        return ret;
+        FRAME_RETURN(Term*, Functor2(atom_cons, String_after(head, n), args[1]));
     }
     fatal_error("internal error: invalid string");
     UNREACHABLE;
 }
 
 bool unify_strings(Term* a, Term* b){
+    FRAME_ENTER_2(a, b);
     D_STRING{
         trace_term("unify a", a);
         trace_term("unify b", b);
@@ -1843,19 +1840,15 @@ bool unify_strings(Term* a, Term* b){
         size_t prev_an = an;
         bool aeos = !String_next_char(&a, &an, &ac);
         if(aeos && a && a->type == VAR){
-            Term** rest = keep(String_after(b, bn));
-            D_STRING{ trace_term("partial b", *rest); }
-            bool ret = unify(a, *rest);
-            unkeep(rest);
-            return ret;
+            FRAME_LOCAL(rest) = String_after(b, bn);
+            D_STRING{ trace_term("partial b", rest); }
+            FRAME_RETURN(bool, unify(a, rest));
         }
         bool beos = !String_next_char(&b, &bn, &bc);
         if(beos && b && b->type == VAR){
-            Term** rest = keep(String_after(prev_a, prev_an));
-            D_STRING{ trace_term("partial a", *rest); }
-            bool ret = unify(b, *rest);
-            unkeep(rest);
-            return ret;
+            FRAME_LOCAL(rest) = String_after(prev_a, prev_an);
+            D_STRING{ trace_term("partial a", rest); }
+            FRAME_RETURN(bool, unify(b, rest));
         }
         D_STRING{
             debug("next: eos (%d %d), c (%d %d), n (%zu %zu)\n", aeos, beos, ac, bc, an, bn);
@@ -1864,35 +1857,33 @@ bool unify_strings(Term* a, Term* b){
         }
         if(aeos != beos || ac != bc){
             D_STRING{ debug("unify failed\n"); }
-            return false;
+            FRAME_RETURN(bool, false);
         }
         if(aeos || beos){
             D_STRING{ debug("unify same\n"); }
-            return true;
+            FRAME_RETURN(bool, true);
         }
     }
 }
 
 bool prim_string_concat(Term** args){
+    FRAME_ENTER;
     Term* ta = chase(args[0]);
     Term* tb = chase(args[1]);
     Term* tc = chase(args[2]);
     if(ta->type == VAR){
-        Buffer* b = Term_string(tb);
-        Buffer* c = Term_string(tc);
+        FRAME_LOCAL(sb) = Term_String(tb);
+        FRAME_LOCAL(sc) = Term_String(tc);
+        Buffer* b = &sb->data.string;
+        Buffer* c = &sc->data.string;
         if(b->end > c->end || memcmp(b->ptr, &c->ptr[c->end - b->end], b->end)){
             return false;
         }
-        disable_gc();
-        bool ret =  unify_strings(ta, String(c->ptr, c->end - b->end));
-        enable_gc();
-        return ret;
+        FRAME_RETURN(bool, unify_strings(ta, String(c->ptr, c->end - b->end)));
     }else{
-        Term** tab = keep(String_concat(ta, tb));
-        D_STRING{ trace_term("concat res", *tab); }
-        bool ret = unify_strings(tc, *tab);
-        unkeep(tab);
-        return ret;
+        FRAME_LOCAL(tab) = String_concat(ta, tb);
+        D_STRING{ trace_term("concat res", tab); }
+        FRAME_RETURN(bool, unify_strings(tc, tab));
     }
 }
 
