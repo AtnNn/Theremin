@@ -543,7 +543,6 @@ void Pool_expand(Pool* p){
     p->sections++;
     p->terms = system_realloc(p->terms, sizeof(Term*) * p->sections);
     p->terms[p->sections-1] = system_alloc(sizeof(Term) * POOL_SECTION_SIZE);
-    // D_GC{ trace_pool_info("expanded", p); }
 }
 
 Term* Pool_add_term_expand(Pool* p){
@@ -1029,11 +1028,6 @@ bool Functor_render_op(Term* term, int render_flags, int left_prec, int right_pr
         parens = true;
     }
 
-    // ATN
-    // char buf[100];
-    // sprintf(buf, " %d[%lu ", left_prec, left);
-    // write(data, buf, strlen(buf));
-
     if(parens){
         left_prec = def_outer_prec;
         right_prec = def_outer_prec;
@@ -1044,8 +1038,10 @@ bool Functor_render_op(Term* term, int render_flags, int left_prec, int right_pr
         FRAME_LOCAL(arg) = term->data.functor.args[next++];
         Term_render(arg, render_flags, left_prec, left, false, write, data);
     }
-    write(data, " ", 1);
     Buffer* s = atom_to_string(term->data.functor.atom);
+    if(!strchr(",", s->ptr[0])){
+        write(data, " ", 1);
+    }
     write(data, s->ptr, s->end);
     write(data, " ", 1);
     if(right){
@@ -1055,10 +1051,6 @@ bool Functor_render_op(Term* term, int render_flags, int left_prec, int right_pr
     if(parens){
         write(data, ")", 1);
     }
-
-    // ATN
-    // sprintf(buf, " %lu]%d ", right, right_prec);
-    // write(data, buf, strlen(buf));
 
     FRAME_RETURN(bool, true);
 }
