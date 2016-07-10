@@ -130,7 +130,7 @@ Term* parse_term_vars(char** str, HashTable* vars, char* end_char);
 bool assertz(Term* term);
 Term** HashTable_get(HashTable* table, Term* key);
 Term* HashTable_find(HashTable* table, Term* key);
-void fatal_error_(const char* func, char* format, ...);
+void fatal_error_(const char* func, const char* file, int line, char* format, ...);
 void load_file(char* path);
 void sanity_check_all();
 void disable_gc();
@@ -237,7 +237,7 @@ bool* debug_enabled = &base_loaded;
 bool always = true;
 #endif
 
-#define fatal_error(...) fatal_error_(__func__, __VA_ARGS__)
+#define fatal_error(...) fatal_error_(__func__, __FILE__, __LINE__, __VA_ARGS__)
 #define guarantee(p, ...) do{ if(!(p)){ fatal_error("guarantee failed `" #p "': " __VA_ARGS__); } }while(0)
 #define guarantee_errno(p, f) guarantee(p, "%s: %s", f, strerror(errno))
 #define debug(...) do{ int _debug_res = fprintf(stderr, __VA_ARGS__); guarantee_errno(_debug_res, "fprintf"); }while(0)
@@ -301,10 +301,10 @@ void* system_realloc(void* p, size_t size){
     return ret;
 }
 
-void fatal_error_(const char* func, char* format, ...){
+void fatal_error_(const char* func, const char* file, int line, char* format, ...){
     va_list argptr;
     va_start(argptr, format);
-    int res = fprintf(stderr, "fatal error in %s: ", func);
+    int res = fprintf(stderr, "fatal error in %s at %s:%d: ", func, file, line);
     guarantee_errno(res >= 0, "fprintf");
     res = vfprintf(stderr, format, argptr);
     guarantee_errno(res >= 0, "vfprintf");
