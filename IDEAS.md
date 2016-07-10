@@ -232,3 +232,4 @@ Some of these ideas are inspired by these languages and projects:
 * K (http://www.kframework.org/)
 * Babelsburg (https://github.com/babelsberg/babelsberg-r)
 * Picat (http://picat-lang.org/)
+* PyHyp (https://github.com/softdevteam/pyhyp_experiments)
