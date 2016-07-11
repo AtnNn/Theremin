@@ -165,10 +165,11 @@ Stream streams[MAX_STREAMS];
 int free_stream = 0;
 int def_outer_prec = 1200;
 
-typedef struct {
+typedef struct eval_env_t {
     Term* query;
     Term* next_query;
     Term* stack;
+    struct eval_env_t* prev_eval;
 } eval_env_t;
 
 eval_env_t* current_eval_env;
@@ -214,7 +215,8 @@ eval_env_t* current_eval_env;
     F(atom_xfy, "xfy") \
     F(atom_yfx, "yfx") \
     F(atom_fx, "fx") \
-    F(atom_fy, "fy")
+    F(atom_fy, "fy") \
+    F(atom_c_land, "c_land")
 
 #define DECLARE_ATOM(a, _) a,
 enum builtin_atoms_t {
@@ -1114,7 +1116,7 @@ void Term_render(Term* term, int render_flags, int left_prec, int right_prec, bo
         if(render_flags & RENDER_STRICT){
             fatal_error("invalid term type");
         }
-        write(data, "?invalid?", 8);
+        write(data, "?invalid?", 9);
     }
 }
 
@@ -1458,12 +1460,18 @@ void add_undo_vars(Term* stack, Term* vars){
 }
 
 void reset_undo_vars(Term* vars){
-    if(Atom_eq(vars, atom_drop)) return;
+    FRAME_ENTER_1(vars);
+    if(Atom_eq(vars, atom_drop)){
+        FRAME_LEAVE;
+        return;
+    }
+    FRAME_LOCAL(var) = NULL;
     for(; !Atom_eq(vars, atom_nil); vars = List_tail(vars)){
-        Term* var = List_head(vars);
-        if(var->type != VAR) fatal_error("cannot reset non-var");
+        var = List_head(vars);
+        assert(var->type == VAR, "cannot reset non-var");
         var->data.var.ref = var;
     }
+    FRAME_LEAVE;
 }
 
 bool stack_push(eval_env_t* eval, atom_t atom, functor_size_t size, Term* term){
@@ -1508,13 +1516,16 @@ bool stack_next(eval_env_t* eval, bool success){
     if(Atom_eq(eval->stack, atom_empty)){
         return false;
     }
+    assert(!Atom_eq(eval->stack, atom_c_land), "missing frame on stack");
     Term** args = Functor_get(eval->stack, atom_frame, 3);
-    if(!args){
-        fatal_error("stack should be empty/0 or frame/3");
-    }
+    assert(args, "stack should be empty/0, c_land/0 or frame/3");
     Term** branches = &args[0];
     Term** vars = &args[1];
     Term* parent = args[2];
+    if(Atom_eq(parent, atom_c_land)){
+        assert(Atom_eq(*branches, atom_true), "first frame not empty");
+        return false;
+    }
     if(success){
         add_undo_vars(parent, *vars);
         eval->stack = parent;
@@ -2189,14 +2200,42 @@ prim_t find_prim(atom_t atom, functor_size_t size){
     return NULL;
 }
 
+void pop_eval_env(bool success){
+    FRAME_ENTER;
+    FRAME_LOCAL(stack) = current_eval_env->stack;
+    current_eval_env = current_eval_env->prev_eval;
+    FRAME_LOCAL(next) = NULL;
+    D_EVAL{ debug("pop eval: %s\n", success ? "true" : "fail"); }
+    while(!Atom_eq(stack, atom_c_land) && !Atom_eq(stack, atom_empty)){
+        Term** args = Functor_get(stack, atom_frame, 3);
+        assert(args, "invalid stack frame");
+        next = args[2];
+        D_EVAL{
+            trace_term(success ? "pop add variables" : "pop reset variables", args[1]);
+        }
+        if(success){
+            add_undo_vars(current_eval_env->stack, args[1]);
+        }else{
+            reset_undo_vars(args[1]);
+        }
+        stack = next;
+    }
+    FRAME_LEAVE;
+}
+
 bool eval_query(Term* query){
     FRAME_ENTER_1(query);
     FRAME_LOCAL(term) = Nil();
     eval_env_t eval;
     eval.query = NULL; FRAME_TRACK_VAR(eval.query);
     eval.next_query = NULL; FRAME_TRACK_VAR(eval.next_query);
-    eval.stack = Atom(atom_empty); FRAME_TRACK_VAR(eval.stack);
-    eval_env_t* prev_eval = current_eval_env;
+    if(current_eval_env){
+        eval.stack = Functor3(atom_frame, Atom(atom_true), Nil(), Atom(atom_c_land));
+    }else{
+        eval.stack = Atom(atom_empty);
+    }
+    FRAME_TRACK_VAR(eval.stack);
+    eval.prev_eval = current_eval_env;
     current_eval_env = &eval;
     while(true){
         SANITY_CHECK;
@@ -2205,13 +2244,13 @@ bool eval_query(Term* query){
         eval.query = term;
         switch(term->type){
         case INTEGER:
-            current_eval_env = prev_eval;
+            pop_eval_env(false);
             FRAME_RETURN(bool, error("Cannot eval integer %ld", term->data.integer));
         case STRING:
-            current_eval_env = prev_eval;
+            pop_eval_env(false);
             FRAME_RETURN(bool, error("Cannot eval string \"%s\"", term->data.string));
         case VAR:
-            current_eval_env = prev_eval;
+            pop_eval_env(false);
             FRAME_RETURN(bool, error("Cannot eval unbound variable '%s'", atom_to_string(term->data.var.name)));
         case MOVED:
             fatal_error("Cannot eval moved term");
@@ -2234,7 +2273,7 @@ bool eval_query(Term* query){
                 success = prim(args);
             }else{
                 if(!stack_push(&eval, atom, size, term)){
-                    current_eval_env = prev_eval;
+                    pop_eval_env(false);
                     FRAME_RETURN(bool, false);
                 }
                 success = false;
@@ -2242,7 +2281,7 @@ bool eval_query(Term* query){
             if(!success || !eval.next_query){
                 if(!stack_next(&eval, success)){
                     D_EVAL{ trace_term("eval stack", eval.stack); }
-                    current_eval_env = prev_eval;
+                    pop_eval_env(success);
                     FRAME_RETURN(bool, success);
                 }
             }
