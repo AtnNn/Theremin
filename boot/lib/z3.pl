@@ -14,15 +14,10 @@ z3_query(z3(In, Out, _), Q) :-
 
 from_sexp(S, A) :- from_sexp(A, S, []), ! .
 
-test(Integer) -->
-    many1(digit, S).
-%, !, { string_to_integer(S, Integer) }.
-
 from_sexp(X) --> many1(whitespace), !, from_sexp(X) .
 from_sexp(String) -->
     ['"'], !, many1(string_char, String), ['"'].
-from_sexp(Integer) -->
-    many1(digit, S), !, { string_to_integer(S, Integer) }.
+from_sexp(Integer) -->integer(N), ! .
 from_sexp(Atom) -->
     sym_char(C), { not(digit(C)) }, !, many0(sym_char, S), { atom_string(Atom,[C|S]) }.
 from_sexp(C) -->

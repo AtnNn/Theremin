@@ -40,9 +40,18 @@ many1(G, [H|T]) --> call(G, H), many0(G, T).
 
 char(C, S, R) :- string_first(S, C), string_concat(C, R, S).
 
-digit(D) --> char(D), { digit(D) }.
+digit(D) --> char(C), { digit(C, D) }.
 
-digit(D) :- member(D, ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]).
+digit("0", 0).
+digit("1", 1).
+digit("2", 2).
+digit("3", 3).
+digit("4", 4).
+digit("5", 5).
+digit("6", 6).
+digit("7", 7).
+digit("8", 8).
+digit("9", 9).
 
 alpha(C) --> char(C), { alpha(C) }.
 
@@ -51,3 +60,9 @@ alpha(C) :- member(C, [
     "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
     "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n",
     "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z"]).
+
+string_to_integer(S, N) :- integer(N, S, []).
+
+integer(N) --> many1(digit, D), !, { fold(add_digit, 0, D, N) }.
+
+add_digit(A, D, AA) :- AA is A * 10 + D.

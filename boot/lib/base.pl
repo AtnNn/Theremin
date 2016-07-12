@@ -8,6 +8,7 @@
 :-(op(500, yfx, '+')).
 :-(op(700, xfx, 'is')).
 :-(op(400, yfx, '/')).
+:-(op(400, yfx, '*')).
 
 :-([library(prelude)]).
 :-([library(list)]).

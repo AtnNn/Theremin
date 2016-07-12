@@ -194,6 +194,7 @@ eval_env_t* current_eval_env;
     F(atom_library, "library") \
     F(atom_is, "is") \
     F(atom_add, "+") \
+    F(atom_mul, "*") \
     F(atom_process_create, "process_create") \
     F(atom_kill_process, "kill_process") \
     F(atom_close, "close") \
@@ -1626,6 +1627,8 @@ integer_t eval_math(Term* expr){
         Term** args = expr->data.functor.args;
         if(atom == atom_add && size == 2){
             return eval_math(args[0]) + eval_math(args[1]);
+        }else if(atom == atom_mul && size == 2){
+            return eval_math(args[0]) * eval_math(args[1]);
         }
     }
     case VAR:
