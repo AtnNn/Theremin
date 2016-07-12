@@ -172,6 +172,11 @@ typedef struct eval_env_t {
     struct eval_env_t* prev_eval;
 } eval_env_t;
 
+typedef struct trace_info_t {
+    int depth;
+    Term* string;
+} trace_info_t;
+
 eval_env_t* current_eval_env;
 
 #define EACH_BUILTIN_ATOM(F) \
@@ -239,6 +244,8 @@ bool debug_string = false;
 bool* debug_enabled = &base_loaded;
 bool always = true;
 #endif
+
+bool enable_trace = false;
 
 #define fatal_error(...) fatal_error_(__func__, __FILE__, __LINE__, __VA_ARGS__)
 #define guarantee(p, ...) do{ if(!(p)){ fatal_error("guarantee failed `" #p "': " __VA_ARGS__); } }while(0)
@@ -1475,6 +1482,38 @@ void reset_undo_vars(Term* vars){
     FRAME_LEAVE;
 }
 
+int stack_depth(eval_env_t* eval){
+    int ret = 0;
+    for(Term* stack = eval->stack; !Atom_eq(stack, atom_empty); ret++){
+        if(Atom_eq(stack, atom_c_land)){
+            eval = eval->prev_eval;
+            stack = eval->stack;
+        }else{
+            Term** args = Functor_get(stack, atom_frame, 3);
+            assert(args, "invalid frame");
+            stack = args[2];
+        }
+    }
+    return ret;
+}
+
+void trace_record(trace_info_t* trace, Term* query, eval_env_t* eval){
+    if(!enable_trace || !base_loaded) return;
+    trace->depth = stack_depth(eval);
+    Buffer* buffer = Term_show(query, 0);
+    trace->string = String(buffer->ptr, buffer->end);
+    Buffer_free(buffer);
+}
+
+void trace_show(trace_info_t* trace, bool success){
+    if(!enable_trace || !base_loaded) return;
+    int depth = trace->depth;
+    while(depth--){
+        debug("   ");
+    }
+    debug("%s%s\n", success ? "   " : " ~ ",trace->string->data.string.ptr);
+}
+
 bool stack_push(eval_env_t* eval, atom_t atom, functor_size_t size, Term* term){
     FRAME_ENTER_1(term);
     FRAME_LOCAL(spec) = Spec(atom, size);
@@ -1557,6 +1596,11 @@ void set_var(Term* a, Term* b){
     assert(a->data.var.ref == a, "variable is already set");
     D_EVAL{
         trace_term("set_var `%s'", b, atom_to_string(a->data.var.name)->ptr);
+    }
+    if(enable_trace && base_loaded){
+        trace_info_t trace;
+        trace_record(&trace, Functor2(atom_eq, a, b), current_eval_env);
+        trace_show(&trace, true);
     }
     a->data.var.ref = b;
     if(current_eval_env){
@@ -2245,11 +2289,15 @@ bool eval_query(Term* query){
     FRAME_TRACK_VAR(eval.stack);
     eval.prev_eval = current_eval_env;
     current_eval_env = &eval;
+    trace_info_t trace;
+    trace.string = NULL;
+    FRAME_TRACK_VAR(trace.string);
     while(true){
         SANITY_CHECK;
         bool success = true;
         term = chase(query);
         eval.query = term;
+        trace_record(&trace, query, &eval);
         switch(term->type){
         case INTEGER:
             pop_eval_env(false);
@@ -2279,11 +2327,14 @@ bool eval_query(Term* query){
             prim_t prim = find_prim(atom, size);
             if(prim){
                 success = prim(args);
+                trace_show(&trace, success);
             }else{
                 if(!stack_push(&eval, atom, size, term)){
+                    trace_show(&trace, false);
                     pop_eval_env(false);
                     FRAME_RETURN(bool, false);
                 }
+                trace_show(&trace, true);
                 success = false;
             }
             if(!success || !eval.next_query){
@@ -2916,7 +2967,7 @@ int main(int argc, char** argv){
     char* arg;
     char* file = NULL;
     char* eval = NULL;
-    char usage[] = "usage: poorlog [FILE] [-e EXPR] [-dparse] [-deval] [-dhashtable] [-dnogc] [-datom] [-dbase] [-dsanity]";
+    char usage[] = "usage: poorlog [FILE] [-e EXPR] [-t] [-dparse] [-deval] [-dhashtable] [-dnogc] [-datom] [-dbase] [-dsanity]";
     bool please_debug_sanity = false;
     while(*args){
         arg = *args++;
@@ -2936,6 +2987,9 @@ int main(int argc, char** argv){
         case 'h':
             printf("%s\n", usage);
             exit(0);
+            break;
+        case 't':
+            enable_trace = true;
             break;
         case 'd':
             if(!strcmp(arg+2, "sanity")) please_debug_sanity = true; else
