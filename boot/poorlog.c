@@ -1639,7 +1639,13 @@ integer_t eval_math(Term* expr){
 }
 
 bool prim_unify(Term** args){
-    return unify(args[0], args[1]);
+    D_EVAL{
+        trace_term("unify a", args[0]);
+        trace_term("unify b", args[1]);
+    }
+    bool res = unify(args[0], args[1]);
+    D_EVAL{ debug("unify res: %s\n", res ? "true" : "fail"); }
+    return res;
 }
 
 bool prim_nl(){
@@ -2130,8 +2136,7 @@ bool prim_string_first(Term** args){
         size_t n = 0;
         char c;
         bool res = String_next_char(&str, &n, &c);
-        guarantee(res, "string_first: empty string");
-        FRAME_RETURN(bool, unify_strings(chr, String(&c, 1)));
+        FRAME_RETURN(bool, res && unify_strings(chr, String(&c, 1)));
     }else{
         Term* s = Term_String(chr);
         guarantee(s->data.string.end == 1, "string_first: first argument is not a singleton");
@@ -2293,7 +2298,7 @@ bool eval_query(Term* query){
 }
 
 bool issymbol(char c){
-    return !isalnum(c) && !isspace(c) && !strchr("()[],'_", c) && isprint(c);
+    return !isalnum(c) && !isspace(c) && !strchr("()[],'_\"%", c) && isprint(c);
 }
 
 char* spaces(char* str){
