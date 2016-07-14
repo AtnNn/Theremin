@@ -128,7 +128,7 @@ enum render_flags_t {
 void trace_term(char* str, Term* term, ...);
 Term* parse_term_vars(char** str, HashTable* vars, char* end_char);
 bool assertz(Term* term);
-Term** HashTable_get(HashTable* table, Term* key);
+Term* HashTable_get(HashTable* table, Term* key);
 Term* HashTable_find(HashTable* table, Term* key);
 void fatal_error_(const char* func, const char* file, int line, char* format, ...);
 void load_file(char* path);
@@ -142,6 +142,9 @@ Term* List_head(Term* list);
 integer_t Term_integer(Term* term);
 Term* List_tail(Term* list);
 void Term_render(Term* term, int render_flags, int left_prec, int right_prec, bool in_list, renderer_t write, void* data);
+void set_var(Term* a, Term* b);
+Term* Var(atom_t name);
+Term* chase(Term* term);
 
 Pool* pool = NULL;
 
@@ -564,7 +567,7 @@ Term* Pool_add_term_expand(Pool* p){
      return term;
 }
 
-void HashTable_each_list(HashTable* table, term_iterator_t f, void* data){
+void HashTable_each_term(HashTable* table, term_iterator_t f, void* data){
     for(size_t i = 0; i < table->size; i++){
         if(table->table[i]){
             f(&table->table[i], data);
@@ -591,7 +594,7 @@ void Pool_pour(Term** term, Pool *p){
             }
             break;
         case DICT:
-            HashTable_each_list(new->data.dict, (term_iterator_t)Pool_pour, (void*)p);
+            HashTable_each_term(new->data.dict, (term_iterator_t)Pool_pour, (void*)p);
             break;
         case INTEGER:
         case STRING:
@@ -603,10 +606,10 @@ void Pool_pour(Term** term, Pool *p){
 }
 
 void each_root(term_iterator_t f, void* data){
-    HashTable_each_list(root.globals, f, data);
-    HashTable_each_list(root.ops, f, data);
-    HashTable_each_list(root.interned, f, data);
-    HashTable_each_list(root.atom_names, f, data);
+    HashTable_each_term(root.globals, f, data);
+    HashTable_each_term(root.ops, f, data);
+    HashTable_each_term(root.interned, f, data);
+    HashTable_each_term(root.atom_names, f, data);
     if(root.nil){ f(&root.nil, data); }
     for(size_t i = 0; i < next_c_term; i++){
         if(*root.c_terms[i]){
@@ -797,6 +800,10 @@ Term* Var(atom_t name){
     return term;
 }
 
+bool Var_is_terminal(Term* term){
+    return term->type == VAR && term->data.var.ref == term;
+}
+
 hash_t hash_byte(uint8_t c, hash_t hash){
     return (hash ^ c) * HASH_PRIME;
 }
@@ -825,6 +832,7 @@ hash_t hash_atom(atom_t atom, hash_t hash){
 }
 
 hash_t hash_rec(Term* term, hash_t hash){
+    term = chase(term);
     switch(term->type){
     case INTEGER:
         return hash_integer(term->data.integer, hash);
@@ -857,19 +865,20 @@ hash_t hash(Term* term){
 
 atom_t intern(Term* str){
     FRAME_ENTER_1(str);
-    FRAME_LOCAL(tatom) = Atom(next_free_atom);
-    Term** term = HashTable_get(root.interned, str);
-    if(*term){
-        guarantee(is_Atom(*term), "interned term is not an atom");
+    assert(str->type == STRING, "cannot intern non-string");
+    FRAME_LOCAL(term) = chase(HashTable_get(root.interned, str));
+    if(!Var_is_terminal(term)){
+        guarantee(is_Atom(term), "interned term is not an atom");
         D_ATOM{
-            debug("already interned `%s' as %lu\n", str->data.string.ptr, (*term)->data.functor.atom);
+            debug("already interned `%s' as %lu\n", str->data.string.ptr, term->data.functor.atom);
         }
-        FRAME_RETURN(atom_t, (*term)->data.functor.atom);
+        FRAME_RETURN(atom_t, term->data.functor.atom);
     }
     atom_t atom = next_free_atom++;
-    *term = tatom;
-    Term** rev = HashTable_get(root.atom_names, tatom);
-    *rev = str;
+    FRAME_LOCAL(tatom) = Atom(atom);
+    set_var(term, tatom);
+    FRAME_LOCAL(rev) = HashTable_get(root.atom_names, tatom);
+    set_var(rev, str);
     D_ATOM{
         debug("interning %s as %lu\n", str->data.string.ptr, atom);
     }
@@ -885,13 +894,13 @@ atom_t intern_nt(char* string){
 void intern_prim(char* string, atom_t atom){
     FRAME_ENTER;
     FRAME_LOCAL(str) = String_nt(string);
-    Term** term = HashTable_get(root.interned, str);
-    if(*term){
+    FRAME_LOCAL(term) = HashTable_get(root.interned, str);
+    if(!Var_is_terminal(term)){
         fatal_error("prim '%s' already exists", string);
     }
-    *term = Atom(atom);
-    Term** rev = HashTable_get(root.atom_names, *term);
-    *rev = str;
+    set_var(term, Atom(atom));
+    FRAME_LOCAL(rev) = HashTable_get(root.atom_names, term);
+    set_var(rev, str);
     D_ATOM{
         debug("interning primitve %s as %lu\n", string, atom);
     }
@@ -919,7 +928,7 @@ Term* atom_to_String(atom_t atom){
     atom_term.data.functor.size = 0;
     atom_term.data.functor.args = NULL;
     Term* term = HashTable_find(root.atom_names, &atom_term);
-    if(!term){
+    if(!term || Var_is_terminal(term)){
         char buf[20];
         snprintf(buf, 20, "?atom_%lu?", atom);
         return String_nt(buf);
@@ -1260,7 +1269,7 @@ bool Term_exact_eq(Term* a, Term* b){
     UNREACHABLE;
 }
 
-Term** Assoc_get(Term** assoc, Term* key){
+Term* Assoc_get(Term** assoc, Term* key){
     FRAME_ENTER_1(key);
     for(Term* list = *assoc; !Atom_eq(list, atom_nil); list = List_tail(list)){
         Term** args = Functor_get(List_head(list), atom_colon, 2);
@@ -1271,12 +1280,13 @@ Term** Assoc_get(Term** assoc, Term* key){
                     trace_term("hash collision", key);
                 }
             }
-            FRAME_RETURN(Term**, &args[1]);
+            FRAME_RETURN(Term*, args[1]);
         }
     }
-    FRAME_LOCAL(pair) = Functor2(atom_colon, key, NULL);
+    FRAME_LOCAL(var) = Var(atom_underscore);
+    FRAME_LOCAL(pair) = Functor2(atom_colon, key, var);
     *assoc = Functor2(atom_cons, pair, *assoc);
-    FRAME_RETURN(Term**, &pair->data.functor.args[1]);
+    FRAME_RETURN(Term*, var);
 }
 
 Term* Assoc_find(Term* assoc, Term* key){
@@ -1289,13 +1299,14 @@ Term* Assoc_find(Term* assoc, Term* key){
                     trace_term("hash collision", key);
                 }
             }
-            return args[1];
+            return chase(args[1]);
         }
     }
     return NULL;
 }
 
-Term** HashTable_get(HashTable* table, Term* key){
+Term* HashTable_get(HashTable* table, Term* key){
+    FRAME_ENTER_1(key);
     hash_t hkey = hash(key);
     Term** assoc = &table->table[hkey % table->size];
     D_HASHTABLE{
@@ -1306,24 +1317,25 @@ Term** HashTable_get(HashTable* table, Term* key){
     if(!*assoc){
         *assoc = Nil();
     }
-    Term** val = Assoc_get(assoc, key);
+    FRAME_LOCAL(val) = Assoc_get(assoc, key);
     D_HASHTABLE{
-        trace_term("val", *val);
+        trace_term("val", val);
     }
-    return val;
+    FRAME_RETURN(Term*, val);
 }
 
 void HashTable_append(HashTable* table, Term* key, Term* val){
-    Term** list = HashTable_get(table, key);
-    if(!*list){
-        *list = Nil();
-    }
-    *list = Functor2(atom_cons, val, *list);
+    FRAME_ENTER_2(key, val);
+    FRAME_LOCAL(list) = HashTable_get(table, key);
+    FRAME_LOCAL(tail) = NULL;
+    for(list = chase(list); list->type != VAR; list = chase(List_tail(list))){ }
+    set_var(list, Functor2(atom_cons, val, Var(atom_underscore)));
     D_HASHTABLE{
         debug("hashtable %p: append\n", (void*)table);
         trace_term("key", key);
         trace_term("val", val);
     }
+    FRAME_LEAVE;
 }
 
 Term* HashTable_find(HashTable* table, Term* key){
@@ -1386,11 +1398,10 @@ Term* Term_copy_rec(Term* term, HashTable* vars){
         return copy;
     }
     case VAR: {
-        Term** copy = HashTable_get(vars, Integer((integer_t)term));
-        if(!*copy){
-            *copy = Var(term->data.var.name);
-        }
-        return *copy;
+        Term* copy = HashTable_get(vars, Integer((integer_t)term)); //TODO: don't cast pointer to integer
+        assert(copy->type == VAR && (copy->data.var.name == atom_underscore || copy->data.var.name == term->data.var.name), "invalid variable in hashtable");
+        copy->data.var.name = term->data.var.name;
+        return copy;
     }
     case DICT:
         fatal_error("unimplemented: copyrec dict");
@@ -1521,10 +1532,12 @@ bool stack_push(eval_env_t* eval, atom_t atom, functor_size_t size, Term* term){
     if(!rules){
         FRAME_RETURN(bool, error("No such predicate '%s'/%u", atom_to_string(atom)->ptr, size));
     }
-    FRAME_LOCAL(branches) = Nil();
+    FRAME_LOCAL(branches) = Var(atom_underscore);
+    FRAME_LOCAL(branches_tail) = branches;
+    FRAME_LOCAL(var) = NULL;
     FRAME_LOCAL(head) = Nil();
     FRAME_LOCAL(branch) = Nil();
-    for(; !Atom_eq(rules, atom_nil); rules = List_tail(rules)){
+    for(; !Var_is_terminal(rules); rules = chase(List_tail(rules))){
         head = Term_copy(List_head(rules));
         Term** args = Functor_get(head, atom_entails, 2);
         if(args){
@@ -1535,8 +1548,11 @@ bool stack_push(eval_env_t* eval, atom_t atom, functor_size_t size, Term* term){
         if(eval->next_query){
             branch = Functor2(atom_comma, branch, eval->next_query);
         }
-        branches = Functor2(atom_cons, branch, branches);
+        var = Var(atom_underscore);
+        set_var(branches_tail, Functor2(atom_cons, branch, var));
+        branches_tail = var;
     }
+    set_var(branches_tail, Nil());
     if(Atom_eq(branches, atom_nil)){
         FRAME_RETURN(bool, error("No rules for predicate '%s/%u'", atom_to_string(atom), size));
     }
@@ -1574,7 +1590,7 @@ bool stack_next(eval_env_t* eval, bool success){
     }else{
         reset_undo_vars(*vars);
         *vars = Nil();
-        Term** car_cdr = Functor_get(*branches, atom_cons, 2);
+        Term** car_cdr = Functor_get(chase(*branches), atom_cons, 2);
         if(car_cdr){
             Term** cadr_args = Functor_get(car_cdr[1], atom_frame, 3);
             if(Atom_eq(car_cdr[1], atom_nil) ||
@@ -1595,7 +1611,10 @@ void set_var(Term* a, Term* b){
     assert(a->type == VAR, "not a variable");
     assert(a->data.var.ref == a, "variable is already set");
     D_EVAL{
-        trace_term("set_var `%s'", b, atom_to_string(a->data.var.name)->ptr);
+        char* name = atom_to_string(a->data.var.name)->ptr;
+        if(name[0] != '_'){
+            trace_term("set_var `%s'", b, name);
+        }
     }
     if(enable_trace && base_loaded){
         trace_info_t trace;
@@ -2465,11 +2484,11 @@ Term* parse_atomic(char** str, HashTable* vars){
             if(!strcmp(buf, "_")){
                 term = Var(atom_underscore);
             }else{
-                Term** var_term = HashTable_get(vars, String_nt(buf));
-                if(!*var_term){
-                    *var_term = Var(intern_nt(buf));
+                Term* var_term = HashTable_get(vars, String_nt(buf));
+                if(Var_is_terminal(var_term)){
+                    set_var(var_term, Var(intern_nt(buf)));
                 }
-                term = *var_term;
+                term = var_term;
             }
         }else{
             term = Atom(intern_nt(buf));
@@ -2613,7 +2632,7 @@ Term* combine_terms(integer_t prec, Term*** terms){
             }
         }
         atom_t name = (*pos)->data.functor.atom;
-        for(; !Atom_eq(list, atom_nil); list = List_tail(list)){
+        for(; !Var_is_terminal(list); list = chase(List_tail(list))){
             Term* op = List_head(list);
             D_PARSE{ trace_term("trying op", op); }
             Term** args = Functor_get(op, atom_op, 3);
@@ -2847,11 +2866,15 @@ void load_base(){
 }
 
 void list_vars(Term* term, HashTable* vars){
+    FRAME_ENTER_1(term);
+    term = chase(term);
     switch(term->type){
     case VAR:
         if(atom_to_string(term->data.var.name)->ptr[0] == '_') return;
-        Term** val = HashTable_get(vars, Integer((integer_t)term));
-        if(!*val) *val = term;
+        FRAME_LOCAL(val) = HashTable_get(vars, Integer((integer_t)term));
+        if(Var_is_terminal(val)){
+            set_var(val, term);
+        }
         break;
     case FUNCTOR:
         for(functor_size_t i = 0; i < term->data.functor.size; i++){
@@ -2866,25 +2889,30 @@ void list_vars(Term* term, HashTable* vars){
     default:
         (void)0;
     }
+    FRAME_LEAVE;
 }
 
 Term* vars_of(Term* term){
-    HashTable* vars = HashTable_new(PARSE_VARS_HASHTABLE_SIZE);
     disable_gc();
+    FRAME_ENTER_1(term);
+    HashTable* vars = HashTable_new(PARSE_VARS_HASHTABLE_SIZE);
     list_vars(term, vars);
-    Term *list = Nil();
+    FRAME_LOCAL(list) = Nil();
+    FRAME_LOCAL(assoc) = NULL;
+    FRAME_LOCAL(var) = NULL;
     for(size_t i = 0; i < vars->size; i++){
-        Term* assoc = vars->table[i];
+        assoc = vars->table[i];
         if(assoc){
             for(; !Atom_eq(assoc, atom_nil); assoc = List_tail(assoc)){
                 Term** args = Functor_get(List_head(assoc), atom_colon, 2);
-                Term* var = Var(((Term*)args[0]->data.integer)->data.var.name);
+                var = Var(args[1]->data.var.ref->data.var.name);
                 list = Functor2(atom_cons, Functor2(atom_eq, var, args[1]), list);
             }
         }
     }
+    HashTable_free(vars);
     enable_gc();
-    return list;
+    FRAME_RETURN(Term*, list);
 }
 
 void eval_interactive(Term* term){
