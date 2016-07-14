@@ -1617,9 +1617,11 @@ void set_var(Term* a, Term* b){
         }
     }
     if(enable_trace && base_loaded){
+        disable_gc();
         trace_info_t trace;
         trace_record(&trace, Functor2(atom_eq, a, b), current_eval_env);
         trace_show(&trace, true);
+        enable_gc();
     }
     a->data.var.ref = b;
     if(current_eval_env){
