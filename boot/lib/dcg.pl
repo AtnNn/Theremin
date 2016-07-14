@@ -53,6 +53,8 @@ digit("7", 7).
 digit("8", 8).
 digit("9", 9).
 
+digit(C) :- digit(C, _).
+
 alpha(C) --> char(C), { alpha(C) }.
 
 alpha(C) :- member(C, [

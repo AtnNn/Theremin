@@ -1596,13 +1596,13 @@ bool stack_next(eval_env_t* eval, bool success){
 void set_var(Term* a, Term* b){
     assert(a->type == VAR, "not a variable");
     assert(a->data.var.ref == a, "variable is already set");
+    char* name = atom_to_string(a->data.var.name)->ptr;
     D_EVAL{
-        char* name = atom_to_string(a->data.var.name)->ptr;
         if(name[0] != '_'){
             trace_term("set_var `%s'", b, name);
         }
     }
-    if(enable_trace && base_loaded){
+    if(enable_trace && base_loaded && current_eval_env && name[0] != '_'){
         disable_gc();
         trace_info_t trace;
         trace_record(&trace, Functor2(atom_eq, a, b), current_eval_env);
@@ -1958,18 +1958,14 @@ bool prim_string_codes(Term** args){
 }
 
 bool prim_atom_string(Term** args){
-    Term* atom = chase(args[0]);
-    Term* string = chase(args[1]);
+    FRAME_ENTER;
+    FRAME_LOCAL(atom) = chase(args[0]);
+    FRAME_LOCAL(string) = chase(args[1]);
     if(is_Atom(atom)){
-        Term* s = atom_to_String(atom->data.functor.atom);
-        bool ret = unify(string, s);
-        return ret;
-    }else if(string->type == STRING){
-        bool ret = unify(atom, Atom(intern(string)));
-        return ret;
+        FRAME_LOCAL(s) = atom_to_String(atom->data.functor.atom);
+        FRAME_RETURN(bool, unify(string, s));
     }else{
-        fatal_error("invalid arguments to atom_string");
-        UNREACHABLE;
+        FRAME_RETURN(bool, unify(atom, Atom(intern(string))));
     }
 }
 
@@ -2788,7 +2784,11 @@ bool assertz(Term* term){
     args = Functor_get(term, atom_long_rarrow, 2);
     if(args){
         FRAME_LOCAL(q) = Functor1(atom_assertz_dcg, term);
-        FRAME_RETURN(bool, eval_query(q));
+        bool saved = enable_trace;
+        enable_trace = false;
+        bool ret = eval_query(q);
+        enable_trace = saved;
+        FRAME_RETURN(bool, ret);
     }
     HashTable_append(root.globals, Spec(term->data.functor.atom, term->data.functor.size), term);
     FRAME_RETURN(bool, true);
