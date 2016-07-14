@@ -203,21 +203,7 @@ eval_env_t* current_eval_env;
     F(atom_is, "is") \
     F(atom_add, "+") \
     F(atom_mul, "*") \
-    F(atom_process_create, "process_create") \
-    F(atom_kill_process, "kill_process") \
-    F(atom_close, "close") \
-    F(atom_read, "read") \
-    F(atom_write, "write") \
-    F(atom_read_string, "read_string") \
-    F(atom_write_string, "write_string") \
-    F(atom_string_codes, "string_codes") \
-    F(atom_atom_string, "atom_string") \
     F(atom_eof, "eof") \
-    F(atom_string_concat, "string_concat") \
-    F(atom_string, "string") \
-    F(atom_string_first, "string_first") \
-    F(atom_var, "var") \
-    F(atom_listing, "listing") \
     F(atom_xf, "xf") \
     F(atom_yf, "yf") \
     F(atom_xfx, "xfx") \
@@ -2231,7 +2217,7 @@ bool prim_listing(Term** args){
     if(!rules){
         FRAME_RETURN(bool, false);
     }
-    for(; !Atom_eq(rules, atom_nil); rules = chase(List_tail(rules))){
+    for(; !Var_is_terminal(rules); rules = chase(List_tail(rules))){
         Term_print(List_head(rules));
         printf("\n");
     }
