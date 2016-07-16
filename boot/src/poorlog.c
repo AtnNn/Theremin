@@ -36,12 +36,6 @@
 #include "parse.h"
 #include "vars.h"
 
-void load_base(){
-    load_file(LIB_PATH "/base.pl");
-
-    base_loaded = true;
-}
-
 void eval_interactive(Term* term){
     FRAME_ENTER_1(term);
     FRAME_LOCAL(vars) = vars_of(term);

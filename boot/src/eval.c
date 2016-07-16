@@ -443,3 +443,10 @@ void eval_toplevel(Term* term){
         fatal_error("failed to assertz term");
     }
 }
+
+HEADER_DECLARE
+void load_base(){
+    load_file(LIB_PATH "/base.pl");
+
+    base_loaded = true;
+}
