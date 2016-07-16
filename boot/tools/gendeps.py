@@ -25,15 +25,18 @@ def main():
             target = args[1]
             args = args[2:]
         elif args[0] == '-o':
-            ofile = args[1]
+            if not ofile:
+                ofile = args[1]
             args = args[2:]
         elif args[0] == '-I':
-            incdir = args[1]
+            if not incdir:
+                incdir = args[1]
             args = args[2:]
         elif args[0][0] == '-':
             args = args[1:]
         else:
-            source = args[0]
+            if not source:
+                source = args[0]
             args = args[1:]
     savedirs(source, ofile)
     out = open(out_path, "w")
@@ -42,6 +45,9 @@ def main():
 
 def depends(target, dep):
     out.write(target + ': ' + dep + '\n')
+
+def pretend_rule(file):
+    out.write(file + ':\n')
 
 def savedirs(source, ofile):
     global srcdir, objdir
@@ -58,6 +64,7 @@ def process_source(source):
         return
     sources_done.append(source)
     depends(out_path, source)
+    pretend_rule(source)
     obj = join(objdir, relpath(splitext(source)[0], srcdir)) + '.o'
     depends(target, obj)
     headers = {header for include in list_includes(source) for header in process_include(include)}
@@ -78,6 +85,7 @@ def process_header(header):
         return headers_include[header]
     except:
         depends(out_path, header)
+        pretend_rule(header)
         ret = list_includes(header)
         headers_include[header] = ret
         return ret

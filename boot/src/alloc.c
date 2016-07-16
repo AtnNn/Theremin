@@ -1,14 +1,21 @@
 #include "genheader.h"
 
-#include <stddef.h>
+#include "alloc.h"
+
+#if HEADER_ONLY
+
 #include <stdlib.h>
+
+#endif
+
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
 
 #include "debug.h"
 
-EXPORT
+HEADER_DECLARE
 void* system_alloc(size_t size){
     void* ret = malloc(size);
     if(!ret){
@@ -19,7 +26,7 @@ void* system_alloc(size_t size){
     return ret;
 }
 
-EXPORT
+HEADER_DECLARE
 void* system_realloc(void* p, size_t size){
     void* ret = realloc(p, size);
     if(!ret){

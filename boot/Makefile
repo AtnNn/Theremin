@@ -3,7 +3,7 @@ CFLAGS ?= -Wall -Wextra -Werror -Wswitch-enum -Wswitch-default -g -std=c99 -peda
 # CFLAGS ?= -O3 -DISABLE_ASSERTS -DISABLE_DEBUG
 LDFLAGS ?=
 
-CFLAGS += -I build/headers
+override CFLAGS += -I build/headers -I src
 
 .DELETE_ON_ERROR:
 
@@ -15,7 +15,7 @@ build/deps.mk: Makefile tools/gendeps.py | build/.
 
 include build/deps.mk
 
-build/headers/%.h: src/%.c | build/headers/.
+build/headers/%.h: src/%.c tools/genheader.py | build/headers/.
 	tools/genheader.py $< > $@
 
 build/obj/%.o: src/%.c | build/obj/.
