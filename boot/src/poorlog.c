@@ -13,17 +13,10 @@
 #include <signal.h>
 int kill(pid_t, int);
 
-#define LIB_PATH "boot/lib"
-
-#define GLOBALS_SIZE 4096
-#define POOL_SECTION_SIZE 4096
-#define INTERNED_TABLE_SIZE 4096
-#define COLLISION_HASHTABLE_SIZE 1024
-#define PARSE_VARS_HASHTABLE_SIZE 1024
-#define OPS_HASHTABLE_SIZE 1024
-#define MAX_NO_PAREN_TERMS 1024
-#define MAX_STREAMS 256
-#define MAX_C_TERMS 1024
+#include "settings.h"
+#include "buffer.h"
+#include "alloc.h"
+#include "debug.h"
 
 #define HASH_INIT 2166136261
 #define HASH_PRIME 16777619
@@ -61,12 +54,6 @@ typedef uint32_t hash_t;
 typedef uint8_t functor_size_t;
 typedef int64_t integer_t;
 typedef uint64_t atom_t;
-
-typedef struct {
-    size_t alloc_size;
-    size_t end;
-    char* ptr;
-} Buffer;
 
 struct HashTable;
 
@@ -119,11 +106,6 @@ enum render_flags_t {
     RENDER_STRICT = 2,
     RENDER_NO_OP = 4
 };
-
-#define MIN(a,b) ((a) < (b) ? a : b)
-#define MAX(a,b) ((a) < (b) ? b : a)
-
-#define BREAKPOINT raise(SIGTRAP)
 
 void trace_term(char* str, Term* term, ...);
 Term* parse_term_vars(char** str, HashTable* vars, char* end_char);
@@ -280,26 +262,6 @@ bool enable_trace = false;
 
 #define FRAME_RETURN(type, ret) do{ type _frame_ret = ret; FRAME_LEAVE; return _frame_ret; }while(0)
 
-void* system_alloc(size_t size){
-    void* ret = malloc(size);
-    if(!ret){
-        fprintf(stderr, "fatal error: memory allocation failed: %s\n", strerror(errno));
-        BREAKPOINT;
-        exit(1);
-    }
-    return ret;
-}
-
-void* system_realloc(void* p, size_t size){
-    void* ret = realloc(p, size);
-    if(!ret){
-        fprintf(stderr, "fatal error: memory allocation failed: %s\n", strerror(errno));
-        BREAKPOINT;
-        exit(1);
-    }
-    return ret;
-}
-
 void fatal_error_(const char* func, const char* file, int line, char* format, ...){
     va_list argptr;
     va_start(argptr, format);
@@ -378,80 +340,6 @@ Stream* Stream_get(int n){
         fatal_error("invalid stream");
     }
     return &streams[n];
-}
-
-Buffer* Buffer_empty(size_t size){
-    Buffer* buffer = system_alloc(sizeof(Buffer));
-    if(size){
-        buffer->alloc_size = size;
-        buffer->end = 0;
-        buffer->ptr = system_alloc(size + 1);
-        buffer->ptr[0] = 0;
-    }else{
-        buffer->alloc_size = 0;
-        buffer->end = 0;
-        buffer->ptr = "\0";
-    }
-    return buffer;
-}
-
-Buffer* Buffer_unsafe(size_t size){
-    Buffer* buffer = Buffer_empty(size);
-    buffer->end = size;
-    return buffer;
-}
-
-void Buffer_reserve(Buffer* buffer, size_t size){
-    if(!buffer->alloc_size && size){
-        buffer->ptr = system_alloc(size + 1);
-        buffer->ptr[0] = 0;
-    }else if(buffer->end > size){
-        return;
-    }else if(!size){
-        buffer->ptr = "\0";
-    }else{
-        buffer->ptr = system_realloc(buffer->ptr, size + 1);
-    }
-    buffer->alloc_size = size;
-}
-
-void Buffer_shrink(Buffer* buffer){
-    Buffer_reserve(buffer, buffer->end);
-}
-
-void Buffer_append(Buffer* buffer, char* str, size_t len){
-    if(buffer->end + len >= buffer->alloc_size){
-        Buffer_reserve(buffer, MAX(buffer->alloc_size * 2, buffer->end + len));
-    }
-    memcpy(buffer->ptr + buffer->end, str, len);
-    buffer->end += len;
-    if(buffer->alloc_size){
-        buffer->ptr[buffer->end] = 0;
-    }
-}
-
-void Buffer_append_nt(Buffer* buffer, char* str){
-    size_t len = strlen(str);
-    Buffer_append(buffer, str, len);
-}
-
-Buffer* Buffer_new(char* str, size_t size){
-    Buffer* buf = Buffer_empty(0);
-    Buffer_append(buf, str, size);
-    return buf;
-}
-
-Buffer* Buffer_new_nt(char* str){
-    Buffer* buf = Buffer_empty(0);
-    Buffer_append_nt(buf, str);
-    return buf;
-}
-
-void Buffer_free(Buffer* buffer){
-    if(buffer->alloc_size){
-        free(buffer->ptr);
-    }
-    free(buffer);
 }
 
 HashTable* HashTable_new(size_t size){

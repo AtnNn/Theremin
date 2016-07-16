@@ -2,7 +2,7 @@
 
 d=$(dirname "$0")
 failed=false
-poorlog=$d/../../poorlog
+poorlog=$d/../poorlog
 
 simple_test () {
     if ! "$poorlog" "$@"; then
