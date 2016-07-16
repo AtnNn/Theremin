@@ -16,6 +16,7 @@ typedef struct eval_env_t {
 #endif
 
 #include <stdlib.h>
+#include <string.h>
 
 #include "frame.h"
 #include "assert.h"

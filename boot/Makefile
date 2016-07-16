@@ -3,7 +3,7 @@ CFLAGS ?= -Wall -Wextra -Werror -Wswitch-enum -Wswitch-default -g -std=c99 -peda
 # CFLAGS ?= -O3 -DISABLE_ASSERTS -DISABLE_DEBUG
 LDFLAGS ?=
 
-override CFLAGS += -I build/headers -I src
+override CFLAGS += -iquote build/headers -iquote src
 
 .DELETE_ON_ERROR:
 

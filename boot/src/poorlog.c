@@ -7,7 +7,6 @@
 #include <stdarg.h>
 #include <ctype.h>
 #include <errno.h>
-
 #include <unistd.h>
 #include <sys/types.h>
 #include <signal.h>

@@ -28,7 +28,7 @@ def main():
             if not ofile:
                 ofile = args[1]
             args = args[2:]
-        elif args[0] == '-I':
+        elif args[0] == '-iquote':
             if not incdir:
                 incdir = args[1]
             args = args[2:]

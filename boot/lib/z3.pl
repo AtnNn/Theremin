@@ -19,7 +19,7 @@ from_sexp(String) -->
     ['"'], !, many1(string_char, String), ['"'].
 from_sexp(Integer) -->integer(Integer), ! .
 from_sexp(Atom) -->
-    sym_char(C), { not(digit(C)) }, !, many0(sym_char, S), { atom_string(Atom,[C|S]) }.
+    sym_char(C), { not(digit(C)) }, !, many0(sym_char, L), { atom_string(Atom, S) }.
 from_sexp(C) -->
     "(", !, many0(whitespace), from_sexp_multi(Terms), many0(whitespace), ")",
     { C =.. Terms, ! ; C = Terms }.
