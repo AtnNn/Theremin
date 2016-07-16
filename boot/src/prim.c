@@ -154,7 +154,7 @@ bool prim_close(Term** args){
 
 bool prim_write_string(Term** args){
     int stream = Integer_get(args[0]);
-    Buffer* str = Term_string(args[1]);
+    Buffer* str = String_pack_buf(args[1]);
     ssize_t res = write(Stream_get(stream)->fd, str->ptr, str->end);
     if(res >= 0){
         return true;
@@ -201,13 +201,13 @@ bool prim_cons(Term** args){
     FRAME_LOCAL(lib) = Functor_get(args[0], atom_library, 1)[0];
     Buffer* path = Buffer_empty(128);
     if(lib){
-        Buffer* name = Term_string(lib);
+        Buffer* name = String_pack_buf(lib);
         Buffer_append_nt(path, LIB_PATH);
         Buffer_append_nt(path, "/");
         Buffer_append_nt(path, name->ptr);
         Buffer_append_nt(path, ".pl");
     }else{
-        Buffer* str = Term_string(List_head(args[0]));
+        Buffer* str = String_pack_buf(List_head(args[0]));
         Buffer_append_nt(path, str->ptr);
     }
     load_file(path->ptr);

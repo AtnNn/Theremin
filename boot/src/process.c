@@ -59,13 +59,13 @@ bool process_create(char* path, char** args, int* in, int* out, int* err, int* p
 HEADER_DECLARE
 bool prim_process_create(Term** args){
     disable_gc();
-    char* command_path = Term_string(args[0])->ptr;
+    char* command_path = String_pack_buf(args[0])->ptr;
     char* command_args[256];
     command_args[0] = command_path;
     size_t n = 1;
     for(Term* list = args[1]; !Atom_eq(list, atom_nil); list = List_tail(list)){
         guarantee(n < sizeof(command_args) - 1, "too many arguments for process");
-        command_args[n] = Term_string(List_head(list))->ptr;
+        command_args[n] = String_pack_buf(List_head(list))->ptr;
         n++;
     }
     command_args[n] = NULL;

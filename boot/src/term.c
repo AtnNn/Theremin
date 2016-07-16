@@ -76,7 +76,6 @@ Term* String_unsafe(size_t size){
     term->data.string.end = 0;
     Buffer_reserve(&term->data.string, size);
     term->data.string.end = size;
-    term->data.string.ptr[term->data.string.end] = 0;
     return term;
 }
 

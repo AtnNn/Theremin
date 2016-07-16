@@ -15,23 +15,24 @@
 #include "render.h"
 #include "eval.h"
 
-void List_as_string_concat_into(Term* term, Buffer* buf){
+Term* String_pack_list(Term* term){
     FRAME_ENTER_1(term);
     FRAME_LOCAL(part) = Nil();
+    FRAME_LOCAL(ret) = String_unsafe(0);
     for(; !Atom_eq(term, atom_nil); term = chase(List_tail(term))){
         part = chase(List_head(term));
         switch(part->type){
         case STRING:
-            Buffer_append(buf, part->data.string.ptr, part->data.string.end);
+            Buffer_append(&ret->data.string, part->data.string.ptr, part->data.string.end);
             break;
         case FUNCTOR:
             guarantee(part->data.functor.size == 0, "non-empty functor in string");
             Buffer* b = atom_to_string(part->data.functor.atom);
-            Buffer_append(buf, b->ptr, b->end);
+            Buffer_append(&ret->data.string, b->ptr, b->end);
             break;
         case INTEGER: {
             char c = part->data.integer;
-            Buffer_append(buf, &c, 1);
+            Buffer_append(&ret->data.string, &c, 1);
             break;
         }
         case MOVED:
@@ -42,10 +43,10 @@ void List_as_string_concat_into(Term* term, Buffer* buf){
             UNREACHABLE;
         }
     }
-    FRAME_LEAVE;
+    FRAME_RETURN(Term*, ret);
 }
 
-Term* Term_String(Term* term){
+Term* String_pack(Term* term){
     FRAME_ENTER_1(term);
     term = chase(term);
     if(term->type == STRING){
@@ -55,15 +56,13 @@ Term* Term_String(Term* term){
     }else if(is_Atom(term)){
         FRAME_RETURN(Term*, atom_to_String(term->data.functor.atom));
     }else{
-        FRAME_LOCAL(str) = String_unsafe(0);
-        List_as_string_concat_into(term, &str->data.string);
-        FRAME_RETURN(Term*, str);
+        FRAME_RETURN(Term*, String_pack_list(term));
     }
 }
 
 HEADER_DECLARE
-Buffer* Term_string(Term* term){
-    return &Term_String(chase(term))->data.string;
+Buffer* String_pack_buf(Term* term){
+    return &String_pack(chase(term))->data.string;
 }
 
 Term* String_concat(Term* a, Term* b){
@@ -178,7 +177,7 @@ Term* String_after(Term* str, size_t n){
         FRAME_RETURN(Term*, str);
     }
     if(str->type == STRING || is_Atom(str)){
-        Buffer* buf = Term_string(str);
+        Buffer* buf = String_pack_buf(str);
         guarantee(buf->end >= n, "internal error: string too short");
         FRAME_RETURN(Term*, String(&buf->ptr[n], buf->end - n));
     }
@@ -250,7 +249,7 @@ bool prim_string_codes(Term** args){
         }
         FRAME_RETURN(bool, unify(string, term));
     }else{
-        FRAME_LOCAL(s) = Term_String(string);
+        FRAME_LOCAL(s) = String_pack(string);
         FRAME_LOCAL(list) = Var(atom_underscore);
         FRAME_LOCAL(tail) = list;
         for(size_t i = 0; i < s->data.string.end; i++){
@@ -268,9 +267,9 @@ bool prim_atom_string(Term** args){
     FRAME_LOCAL(string) = chase(args[1]);
     if(is_Atom(atom)){
         FRAME_LOCAL(s) = atom_to_String(atom->data.functor.atom);
-        FRAME_RETURN(bool, unify(string, s));
+        FRAME_RETURN(bool, unify_strings(string, s));
     }else{
-        FRAME_RETURN(bool, unify(atom, Atom(intern(string))));
+        FRAME_RETURN(bool, unify(atom, Atom(intern(String_pack(string)))));
     }
 }
 
@@ -281,8 +280,8 @@ bool prim_string_concat(Term** args){
     Term* tb = chase(args[1]);
     Term* tc = chase(args[2]);
     if(ta->type == VAR){
-        FRAME_LOCAL(sb) = Term_String(tb);
-        FRAME_LOCAL(sc) = Term_String(tc);
+        FRAME_LOCAL(sb) = String_pack(tb);
+        FRAME_LOCAL(sc) = String_pack(tc);
         Buffer* b = &sb->data.string;
         Buffer* c = &sc->data.string;
         if(b->end > c->end || memcmp(b->ptr, &c->ptr[c->end - b->end], b->end)){
@@ -307,7 +306,7 @@ bool prim_string_first(Term** args){
         bool res = String_next_char(&str, &n, &c);
         FRAME_RETURN(bool, res && unify_strings(chr, String(&c, 1)));
     }else{
-        Term* s = Term_String(chr);
+        Term* s = String_pack(chr);
         guarantee(s->data.string.end == 1, "string_first: first argument is not a singleton");
         FRAME_LOCAL(var) = Var(atom_underscore);
         Term* concat_args[3];
