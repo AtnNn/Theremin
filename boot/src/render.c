@@ -154,7 +154,16 @@ void Term_render(Term* term, int render_flags, int left_prec, int right_prec, bo
     case FUNCTOR:
         if (render_flags & RENDER_NO_OP || !render_op(term, render_flags, left_prec, right_prec, in_list, write, data)) {
             Buffer* name = atom_to_string(term->data.functor.atom);
+            bool quote = false;
+            for(size_t i = 0; i < name->end; i++) {
+                if(!(isalnum(name->ptr[i]) || name->ptr[i] == '_')){
+                    quote = true;
+                    break;
+                }
+            }
+            if(quote) write(data, "'", 1);
             write(data, name->ptr, name->end);
+            if(quote) write(data, "'", 1);
             if(term->data.functor.size){
                 write(data, "(", 1);
                 for(int i = 0; i < term->data.functor.size; i++){

@@ -12,6 +12,14 @@
 
 #endif
 
+#include <ctype.h>
+#include <string.h>
+
+HEADER_DECLARE
+bool issymbol(char c){
+    return !isalnum(c) && !isspace(c) && !strchr("()[],'_\"%", c) && isprint(c);
+}
+
 HEADER_DECLARE
 int op_type_arg_size(atom_t type){
     switch(type){

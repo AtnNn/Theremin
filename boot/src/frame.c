@@ -4,6 +4,7 @@
 
 #if HEADER_ONLY
 
+#include "error.h"
 #include "assert.h"
 #include "settings.h"
 #include "roots.h"

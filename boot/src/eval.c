@@ -21,6 +21,7 @@ typedef struct eval_env_t {
 #include <stdlib.h>
 #include <string.h>
 
+#include "utils.h"
 #include "frame.h"
 #include "assert.h"
 #include "debug.h"

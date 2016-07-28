@@ -30,3 +30,6 @@ clean:
 
 %/.:
 	+mkdir -p $*
+
+etags:
+	ctags -e `find src -type f`

@@ -24,10 +24,6 @@
 Term* parse_term_vars(char** str, HashTable* vars, char* end_chars);
 Term* parse_list(char** str, HashTable* vars);
 
-bool issymbol(char c){
-    return !isalnum(c) && !isspace(c) && !strchr("()[],'_\"%", c) && isprint(c);
-}
-
 HEADER_DECLARE
 char* spaces(char* str){
     while(true){
