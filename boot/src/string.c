@@ -1,3 +1,5 @@
+// TODO: better string representation to avoid allocation in string_first
+
 #include "genheader.h"
 
 #include "string.h"
@@ -85,8 +87,8 @@ Term* String_concat(Term* a, Term* b){
     FRAME_LOCAL(out) = tail;
     while(true){
         Term** args = Functor_get(a, atom_cons, 2);
-        Term* head = chase(args[0]);
         if(args){
+            Term* head = chase(args[0]);
             if(head->type == INTEGER ||
                head->type == STRING ||
                is_Atom(head)){

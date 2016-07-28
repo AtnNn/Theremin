@@ -63,7 +63,7 @@ Term* parse_parens(char** str, HashTable* vars){
 }
 
 
-Term* parse_atomic(char** str, HashTable* vars){
+Term* parse_atomic(char** str, HashTable* vars, bool* maybe_op){
     char* start = spaces(*str);
     char* pos = start;
     char* end;
@@ -74,6 +74,7 @@ Term* parse_atomic(char** str, HashTable* vars){
     if(!*pos){
         return NULL;
     }
+    *maybe_op = true;
     if(isalpha(*pos) || *pos == '_'){
         if(isupper(*pos) || *pos == '_'){
             var = true;
@@ -81,6 +82,7 @@ Term* parse_atomic(char** str, HashTable* vars){
         while(isalpha(*pos) || isdigit(*pos) || *pos == '_'){ pos++; }
         end = pos;
     }else if(*pos == '\''){
+        *maybe_op = false;
         while(*++pos != '\''){ }
         start++;
         end = pos++;
@@ -195,9 +197,10 @@ Term* parse_simple_term(char** str, HashTable* vars){
         char next = *(pos + 1);
         if(isspace(next) || !next) return NULL; }
     }
-    Term* atom = parse_atomic(&pos, vars);
+    bool maybe_op = false;
+    Term* atom = parse_atomic(&pos, vars, &maybe_op);
     if(!atom) return NULL;
-    if(is_Atom(atom) && HashTable_find(root.ops, atom)){
+    if(maybe_op && is_Atom(atom) && HashTable_find(root.ops, atom)){
         *str = pos;
         return atom;
     }

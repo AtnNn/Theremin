@@ -20,7 +20,7 @@ convert_dcg_body((A; B), (Ap; Bp), L, R) :-
 convert_dcg_body(!, (!, C), L, R) :- !, C=(L=R, ! ; string_concat([], L, R)).
 convert_dcg_body({X},(X,C),L,R) :- !, C=(L=R, ! ; string_concat([], L, R)).
 convert_dcg_body([], C, L, R) :- !, C=(L=R, ! ; string_concat([], L, R)).
-convert_dcg_body([H|T], append([H|T], R, L), L, R) :- ! .
+convert_dcg_body([H|T], (append([H|T], R, L), ! ; string_concat([H|T], R, L)), L, R) :- ! .
 convert_dcg_body(S, string_concat(S, R, L), L, R) :- string(S), ! .
 convert_dcg_body(F, G, L, R) :-
     F =.. FArgs,
@@ -28,6 +28,10 @@ convert_dcg_body(F, G, L, R) :-
     G =.. GArgs.
 
 whitespace --> " "; [9]; [10].
+
+','(A, B, L, R) :- call(A, L, M), call(B, M, R).
+
+';'(A, B, L, R) :- call(A, L, R); call(B, L, R).
 
 many0(G) --> call(G), many0(G); {true}.
 
@@ -68,3 +72,6 @@ string_to_integer(S, N) :- integer(N, S, []).
 integer(N) --> many1(digit, D), !, { fold(add_digit, 0, D, N) }.
 
 add_digit(A, D, AA) :- AA is A * 10 + D.
+
+oneof([X|_], X) --> [X].
+oneof([_|Xs], X) --> oneof(Xs, X).

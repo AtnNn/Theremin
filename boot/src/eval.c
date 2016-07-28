@@ -1,3 +1,6 @@
+// TODO: if a variable is not accessible from the undo stack, collapse it in `chase` and `set_var` and don't save it to the stack
+// TODO: separate namespace for each module
+
 #include "genheader.h"
 
 #include "eval.h"
