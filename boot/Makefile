@@ -11,7 +11,7 @@ poorlog:
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
 
 build/deps.mk: Makefile tools/gendeps.py | build/.
-	tools/gendeps.py -deps-out $@ -deps-target poorlog src/poorlog.c -o build/obj/poorlog.o $(CFLAGS)
+	+tools/gendeps.py -deps-out $@ -deps-target poorlog src/poorlog.c -o build/obj/poorlog.o $(CFLAGS)
 
 include build/deps.mk
 

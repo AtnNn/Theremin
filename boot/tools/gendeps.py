@@ -41,13 +41,17 @@ def main():
     savedirs(source, ofile)
     out = open(out_path, "w")
     process_source(source)
-    out.close()
+    end()
 
 def depends(target, dep):
     out.write(target + ': ' + dep + '\n')
 
 def pretend_rule(file):
     out.write(file + ':\n')
+
+def end():
+    out.close()
+    exit(0)
 
 def savedirs(source, ofile):
     global srcdir, objdir
@@ -67,28 +71,39 @@ def process_source(source):
     pretend_rule(source)
     obj = join(objdir, relpath(splitext(source)[0], srcdir)) + '.o'
     depends(target, obj)
-    headers = {header for include in list_includes(source) for header in process_include(include)}
-    for header in headers:
-        depends(obj, header)
+    for include in list_includes(source):
+        for header in process_include(include):
+            depends(obj, header)
 
 def process_include(include):
     header = join(srcdir, include)
     if exists(header):
-        return process_header(header)
+        yield header
+        yield from process_header(header)
+        return
     header = join(incdir, include)
-    process_source(join(srcdir, splitext(include)[0] + '.c'))
-    return [header]
+    if exists(header):
+        source = join(srcdir, relpath(splitext(header)[0], incdir)) + '.c'
+        process_source(source)
+        yield header
+        yield from process_header(header)
+        return
+    depends(out_path, header)
+    end()
 
 def process_header(header):
     global headers_include
     try:
         return headers_include[header]
     except:
-        depends(out_path, header)
-        pretend_rule(header)
-        ret = list_includes(header)
-        headers_include[header] = ret
-        return ret
+        pass
+    pretend_rule(header)
+    depends(out_path, header)
+    includes = list_includes(header)
+    headers = [list(process_include(include)) for include in includes]
+    ret = sum(headers, [])
+    headers_include[header] = ret
+    return ret
 
 def list_includes(source):
     ret = []
