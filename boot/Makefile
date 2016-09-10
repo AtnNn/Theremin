@@ -1,5 +1,5 @@
 CC := clang
-CFLAGS ?= -Wall -Wextra -Werror -Wswitch-enum -Wswitch-default -g -std=c99 -pedantic-errors
+CFLAGS ?= -O0 -Wall -Wextra -Werror -Wswitch-enum -Wswitch-default -g -std=c99 -pedantic-errors
 # CFLAGS ?= -O3 -DISABLE_ASSERTS -DISABLE_DEBUG
 LDFLAGS ?=
 

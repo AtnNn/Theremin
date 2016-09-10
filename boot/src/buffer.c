@@ -41,6 +41,7 @@ HEADER_DECLARE
 Buffer* Buffer_unsafe(size_t size){
     Buffer* buffer = Buffer_empty(size);
     buffer->end = size;
+    buffer->ptr[size] = 0;
     return buffer;
 }
 
