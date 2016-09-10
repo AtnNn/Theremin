@@ -198,16 +198,17 @@ bool prim_read_string(Term** args){
 bool prim_cons(Term** args){
     FRAME_ENTER;
     guarantee(Atom_eq(args[1], atom_nil), "load should be a singleton");
-    FRAME_LOCAL(lib) = Functor_get(args[0], atom_library, 1)[0];
     Buffer* path = Buffer_empty(128);
-    if(lib){
+    Term** libargs = Functor_get(args[0], atom_library, 1);
+    if(libargs){
+        FRAME_LOCAL(lib) = libargs[0];
         Buffer* name = String_pack_buf(lib);
         Buffer_append_nt(path, LIB_PATH);
         Buffer_append_nt(path, "/");
         Buffer_append_nt(path, name->ptr);
         Buffer_append_nt(path, ".pl");
     }else{
-        Buffer* str = String_pack_buf(List_head(args[0]));
+        Buffer* str = String_pack_buf(args[0]);
         Buffer_append_nt(path, str->ptr);
     }
     load_file(path->ptr);
