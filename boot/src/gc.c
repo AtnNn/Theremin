@@ -105,6 +105,7 @@ void Pool_pour(Term** term, Pool *p){
         case STRING:
             break;
         case MOVED:
+        default:
             UNREACHABLE;
         }
     }

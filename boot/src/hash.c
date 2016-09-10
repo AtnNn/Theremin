@@ -76,6 +76,8 @@ hash_t hash_rec(Term* term, hash_t hash){
         fatal_error("unimplemented: hash dict");
     case MOVED:
         fatal_error("Cannot hash a moved term");
+    default:
+        UNREACHABLE;
     }
     UNREACHABLE;
 }

@@ -20,6 +20,7 @@ typedef struct eval_env_t {
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 
 #include "utils.h"
 #include "frame.h"
@@ -193,6 +194,7 @@ bool unify(Term* a, Term* b){
     case MOVED:
         fatal_error("Cannot unify a moved term");
     case VAR:
+    default:
         UNREACHABLE;
     }
     UNREACHABLE;
@@ -390,6 +392,8 @@ bool eval_query(Term* query){
             query = eval.next_query;
             eval.next_query = NULL;
             break; }
+        default:
+            UNREACHABLE;
         }
     }
 }

@@ -192,6 +192,8 @@ Term* parse_simple_term(char** str, HashTable* vars){
     case '.': {
         char next = *(pos + 1);
         if(isspace(next) || !next) return NULL; }
+    default:
+        break;
     }
     bool maybe_op = false;
     Term* atom = parse_atomic(&pos, vars, &maybe_op);

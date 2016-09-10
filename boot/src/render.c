@@ -65,6 +65,7 @@ bool render_op(Term* term, int render_flags, int left_prec, int right_prec, bool
     int inner_prec;
     atom_t type;
     while(true){
+        list = chase(list);
         if(Atom_eq(list, atom_nil)){
             FRAME_RETURN(bool, false);
         }

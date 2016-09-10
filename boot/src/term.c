@@ -205,6 +205,8 @@ void Term_destroy(Term* term){
     case DICT:
         HashTable_free(term->data.dict);
         break;
+    default:
+        UNREACHABLE;
     }
 }
 
@@ -264,6 +266,8 @@ bool Term_exact_eq(Term* a, Term* b){
         return true;
     case DICT:
         fatal_error("unimplemented: exact_eq dict");
+    default:
+        UNREACHABLE;
     }
     UNREACHABLE;
 }
