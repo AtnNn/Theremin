@@ -67,12 +67,6 @@ bool prim_nl(){
     return true;
 }
 
-bool prim_cut(){
-    Term** frame = Functor_get(current_eval_env->stack, atom_frame, 3);
-    frame[0] = Nil();
-    return true;
-}
-
 bool prim_assertz(Term** args){
     return assertz(args[0]);
 }
@@ -247,7 +241,6 @@ prim_t find_prim(atom_t atom, functor_size_t size){
     PRIM(=, 2, unify);
     PRIM(nl, 0, nl);
     PRIM(op, 3, op);
-    PRIM(!, 0, cut);
     PRIM(assertz, 1, assertz);
     PRIM(=.., 2, univ);
     PRIM(is, 2, is);

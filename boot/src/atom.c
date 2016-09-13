@@ -41,7 +41,10 @@ typedef uint64_t atom_t;
     F(atom_yfx, "yfx") \
     F(atom_fx, "fx") \
     F(atom_fy, "fy") \
-    F(atom_c_land, "c_land")
+    F(atom_c_land, "c_land") \
+    F(atom_cut, "!") \
+    F(atom_false, "false") \
+    F(atom_or, ";")
 
 #define DECLARE_ATOM(a, _) a,
 enum builtin_atoms_t {

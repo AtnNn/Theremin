@@ -46,6 +46,46 @@ static bool enable_trace = false;
 HEADER_DECLARE
 bool base_loaded = false;
 
+Term* stack_branches(Term* stack){
+    Term** args = Functor_get(stack, atom_frame, 4);
+    assert(args, "invalid stack frame");
+    return args[0];
+}
+
+Term* stack_undo_vars(Term* stack){
+    Term** args = Functor_get(stack, atom_frame, 4);
+    assert(args, "invalid stack frame");
+    return args[1];
+}
+
+Term* stack_parent(Term* stack){
+    Term** args = Functor_get(stack, atom_frame, 4);
+    assert(args, "invalid stack frame");
+    return args[2];
+}
+
+bool stack_cut_barrier(Term* stack){
+    Term** args = Functor_get(stack, atom_frame, 4);
+    assert(args, "invalid stack frame");
+    return Atom_eq(args[3], atom_true);
+}
+
+void new_stack_frame(Term** stack, Term* branches, bool cut_barrier){
+    FRAME_ENTER_1(branches);
+    *stack = Functor4(atom_frame, branches, Nil(), *stack, Atom(cut_barrier ? atom_true : atom_false));
+    FRAME_LEAVE;
+}
+
+void stack_set_parent(Term** stack, Term* parent){
+    FRAME_ENTER_1(parent);
+    Term** args = Functor_get(parent, atom_frame, 4);
+    if(args && !Atom_eq(args[3], atom_true)){
+        args[3] = Functor_get(*stack, atom_frame, 4)[3];
+    }
+    *stack =  parent;
+    FRAME_LEAVE;
+}
+
 int stack_depth(eval_env_t* eval){
     int ret = 0;
     for(Term* stack = eval->stack; !Atom_eq(stack, atom_empty); ret++){
@@ -53,9 +93,7 @@ int stack_depth(eval_env_t* eval){
             eval = eval->prev_eval;
             stack = eval->stack;
         }else{
-            Term** args = Functor_get(stack, atom_frame, 3);
-            assert(args, "invalid frame");
-            stack = args[2];
+            stack = stack_parent(stack);
         }
     }
     return ret;
@@ -85,12 +123,11 @@ void set_tracing(bool b){
 
 void add_undo_var(Term* stack, Term* var){
     FRAME_ENTER_2(stack, var);
-    Term** args = Functor_get(stack, atom_frame, 3);
-    if(!args){
+    if(Atom_eq(stack, atom_empty)){
         FRAME_LEAVE;
         return;
     }
-    FRAME_LOCAL(undo_vars) = args[1];
+    FRAME_LOCAL(undo_vars) = stack_undo_vars(stack);
     if(!Atom_eq(undo_vars, atom_drop)){
         stack->data.functor.args[1] = Functor2(atom_cons, var, undo_vars);
     }
@@ -103,7 +140,7 @@ void add_undo_vars(Term* stack, Term* vars){
         FRAME_LEAVE;
         return;
     }
-    Term** args = Functor_get(stack, atom_frame, 3);
+    Term** args = Functor_get(stack, atom_frame, 4);
     if(!args){
         FRAME_LEAVE;
         return;
@@ -208,7 +245,7 @@ void pop_eval_env(bool success){
     FRAME_LOCAL(next) = NULL;
     D_EVAL{ debug("pop eval: %s\n", success ? "true" : "fail"); }
     while(!Atom_eq(stack, atom_c_land) && !Atom_eq(stack, atom_empty)){
-        Term** args = Functor_get(stack, atom_frame, 3);
+        Term** args = Functor_get(stack, atom_frame, 4);
         assert(args, "invalid stack frame");
         next = args[2];
         D_EVAL{
@@ -268,7 +305,9 @@ bool stack_push(eval_env_t* eval, atom_t atom, functor_size_t size, Term* term){
     if(Atom_eq(branches, atom_nil)){
         FRAME_RETURN(bool, error("No rules for predicate '%s/%u'", atom_to_string(atom), size));
     }
-    eval->stack = Functor3(atom_frame, branches, Nil(), eval->stack);
+    // TODO: make prim
+    bool cuttable = !(atom == atom_or);
+    new_stack_frame(&eval->stack, branches, cuttable);
     eval->next_query = NULL;
     FRAME_RETURN(bool, true);
 }
@@ -285,7 +324,7 @@ bool stack_next(eval_env_t* eval, bool success){
         return false;
     }
     assert(!Atom_eq(eval->stack, atom_c_land), "missing frame on stack");
-    Term** args = Functor_get(eval->stack, atom_frame, 3);
+    Term** args = Functor_get(eval->stack, atom_frame, 4);
     assert(args, "stack should be empty/0, c_land/0 or frame/3");
     Term** branches = &args[0];
     Term** vars = &args[1];
@@ -296,7 +335,7 @@ bool stack_next(eval_env_t* eval, bool success){
     }
     if(success){
         add_undo_vars(parent, *vars);
-        eval->stack = parent;
+        stack_set_parent(&eval->stack, parent);
         eval->next_query = Atom(atom_true);
         return true;
     }else{
@@ -304,7 +343,7 @@ bool stack_next(eval_env_t* eval, bool success){
         *vars = Nil();
         Term** car_cdr = Functor_get(chase(*branches), atom_cons, 2);
         if(car_cdr){
-            Term** cadr_args = Functor_get(car_cdr[1], atom_frame, 3);
+            Term** cadr_args = Functor_get(car_cdr[1], atom_frame, 4);
             if(Atom_eq(car_cdr[1], atom_nil) ||
                (cadr_args && Atom_eq(cadr_args[1], atom_drop))){
                 *vars = Atom(atom_drop);
@@ -313,10 +352,27 @@ bool stack_next(eval_env_t* eval, bool success){
             eval->next_query = car_cdr[0];
             return true;
         }else{
-            eval->stack = parent;
+            stack_set_parent(&eval->stack, parent);
             return stack_next(eval, false);
         }
     }
+}
+
+void cut(Term* stack){
+    FRAME_ENTER_1(stack);
+    Term** args;
+    while(true){
+        args = Functor_get(stack, atom_frame, 4);
+        if(!args){
+            break;
+        }
+        args[0] = Atom(atom_true);
+        if(Atom_eq(args[3], atom_true)){
+            break;
+        }
+        stack = args[2];
+    }
+    FRAME_LEAVE;
 }
 
 HEADER_DECLARE
@@ -327,7 +383,7 @@ bool eval_query(Term* query){
     eval.query = NULL; FRAME_TRACK_VAR(eval.query);
     eval.next_query = NULL; FRAME_TRACK_VAR(eval.next_query);
     if(current_eval_env){
-        eval.stack = Functor3(atom_frame, Atom(atom_true), Nil(), Atom(atom_c_land));
+        eval.stack = Functor4(atom_frame, Atom(atom_true), Nil(), Atom(atom_c_land), Atom(atom_false));
     }else{
         eval.stack = Atom(atom_empty);
     }
@@ -364,6 +420,12 @@ bool eval_query(Term* query){
             if(atom == atom_comma && size == 2){
                 eval.next_query = eval.next_query ? Functor2(atom_comma, args[1], eval.next_query) : args[1];
                 query = args[0];
+                continue;
+            }
+            if(atom == atom_cut && size == 0){
+                cut(eval.stack);
+                query = eval.next_query;
+                eval.next_query = NULL;
                 continue;
             }
             D_EVAL{

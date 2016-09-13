@@ -15,6 +15,7 @@ build/deps.mk: Makefile tools/gendeps.py | build/.
 
 include build/deps.mk
 
+# TODO: don't trigger rebuilds if only #line pragmas have changed
 build/headers/%.h: src/%.c tools/genheader.py | build/headers/.
 	tools/genheader.py $< > $@
 
