@@ -70,9 +70,9 @@ bool stack_cut_barrier(Term* stack){
     return Atom_eq(args[3], atom_true);
 }
 
-void new_stack_frame(Term** stack, Term* branches, bool cut_barrier){
+void new_stack_frame(Term** stack, Term* branches){
     FRAME_ENTER_1(branches);
-    *stack = Functor4(atom_frame, branches, Nil(), *stack, Atom(cut_barrier ? atom_true : atom_false));
+    *stack = Functor4(atom_frame, branches, Nil(), *stack, Atom(atom_false));
     FRAME_LEAVE;
 }
 
@@ -83,6 +83,15 @@ void stack_set_parent(Term** stack, Term* parent){
         args[3] = Functor_get(*stack, atom_frame, 4)[3];
     }
     *stack =  parent;
+    FRAME_LEAVE;
+}
+
+void stack_set_cut_barrier(Term* stack, bool cut_barrier){
+    FRAME_ENTER_1(stack);
+    Term** args = Functor_get(stack, atom_frame, 4);
+    if(args){
+        args[3] = Atom(cut_barrier ? atom_true : atom_false);
+    }
     FRAME_LEAVE;
 }
 
@@ -271,7 +280,6 @@ void error(char* format, ...){
     res = fprintf(stderr, "\n");
     guarantee_errno(res >= 0, "fprintf");
     va_end(argptr);
-    return false;
 }
 
 bool stack_push(eval_env_t* eval, atom_t atom, functor_size_t size, Term* term){
@@ -295,6 +303,7 @@ bool stack_push(eval_env_t* eval, atom_t atom, functor_size_t size, Term* term){
         }else{
             branch = Functor2(atom_eq, term, head);
         }
+        branch = Functor2(atom_comma, Atom(atom_cut_barrier), branch);
         if(eval->next_query){
             branch = Functor2(atom_comma, branch, eval->next_query);
         }
@@ -307,9 +316,7 @@ bool stack_push(eval_env_t* eval, atom_t atom, functor_size_t size, Term* term){
         error("No rules for predicate '%s/%u'", atom_to_string(atom), size) ;
         FRAME_RETURN(bool, false);
     }
-    // TODO: make prim
-    bool cuttable = !(atom == atom_or);
-    new_stack_frame(&eval->stack, branches, cuttable);
+    new_stack_frame(&eval->stack, branches);
     eval->next_query = NULL;
     FRAME_RETURN(bool, true);
 }
@@ -429,6 +436,18 @@ bool eval_query(Term* query){
             }
             if(atom == atom_cut && size == 0){
                 cut(eval.stack);
+                query = eval.next_query;
+                eval.next_query = NULL;
+                continue;
+            }
+            if(atom == atom_cut_barrier && size == 0){
+                stack_set_cut_barrier(eval.stack, true);
+                query = eval.next_query;
+                eval.next_query = NULL;
+                continue;
+            }
+            if(atom == atom_cut_passthrough && size == 0){
+                stack_set_cut_barrier(eval.stack, false);
                 query = eval.next_query;
                 eval.next_query = NULL;
                 continue;

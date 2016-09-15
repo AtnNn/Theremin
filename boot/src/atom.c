@@ -44,7 +44,9 @@ typedef uint64_t atom_t;
     F(atom_c_land, "c_land") \
     F(atom_cut, "!") \
     F(atom_false, "false") \
-    F(atom_or, ";")
+    F(atom_or, ";") \
+    F(atom_cut_barrier, "cut_barrier") \
+    F(atom_cut_passthrough, "cut_passthrough")
 
 #define DECLARE_ATOM(a, _) a,
 enum builtin_atoms_t {
