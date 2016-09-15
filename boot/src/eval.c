@@ -261,7 +261,7 @@ void pop_eval_env(bool success){
     FRAME_LEAVE;
 }
 
-bool error(char* format, ...){
+void error(char* format, ...){
     va_list argptr;
     va_start(argptr, format);
     int res = fprintf(stderr, "error: ");
@@ -279,7 +279,8 @@ bool stack_push(eval_env_t* eval, atom_t atom, functor_size_t size, Term* term){
     FRAME_LOCAL(spec) = Spec(atom, size);
     Term* rules = HashTable_find(root.globals, spec);
     if(!rules){
-        FRAME_RETURN(bool, error("No such predicate '%s'/%u", atom_to_string(atom)->ptr, size));
+        error("No such predicate '%s'/%u", atom_to_string(atom)->ptr, size) ;
+        FRAME_RETURN(bool, false);
     }
     FRAME_LOCAL(branches) = Var(atom_underscore);
     FRAME_LOCAL(branches_tail) = branches;
@@ -303,7 +304,8 @@ bool stack_push(eval_env_t* eval, atom_t atom, functor_size_t size, Term* term){
     }
     set_var(branches_tail, Nil());
     if(Atom_eq(branches, atom_nil)){
-        FRAME_RETURN(bool, error("No rules for predicate '%s/%u'", atom_to_string(atom), size));
+        error("No rules for predicate '%s/%u'", atom_to_string(atom), size) ;
+        FRAME_RETURN(bool, false);
     }
     // TODO: make prim
     bool cuttable = !(atom == atom_or);
@@ -402,13 +404,16 @@ bool eval_query(Term* query){
         switch(term->type){
         case INTEGER:
             pop_eval_env(false);
-            FRAME_RETURN(bool, error("Cannot eval integer %ld", term->data.integer));
+            error("Cannot eval integer %ld", term->data.integer) ;
+            FRAME_RETURN(bool, false);
         case STRING:
             pop_eval_env(false);
-            FRAME_RETURN(bool, error("Cannot eval string \"%s\"", term->data.string));
+            error("Cannot eval string \"%s\"", term->data.string) ;
+            FRAME_RETURN(bool, false);
         case VAR:
             pop_eval_env(false);
-            FRAME_RETURN(bool, error("Cannot eval unbound variable '%s'", atom_to_string(term->data.var.name)));
+            error("Cannot eval unbound variable '%s'", atom_to_string(term->data.var.name)) ;
+            FRAME_RETURN(bool, false);
         case MOVED:
             fatal_error("Cannot eval moved term");
         case DICT:
